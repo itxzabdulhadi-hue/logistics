@@ -1,0 +1,103 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { BookingManager } from "@/components/admin/booking-manager";
+import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
+import { requireRole } from "@/lib/auth";
+import { STATUS_META } from "@/lib/booking-rules";
+import { formatDateTime, formatKm, formatMoney, titleCase } from "@/lib/utils";
+import { getBookingDetail } from "@/services/bookings";
+import { listAssignableVehicles } from "@/services/fleet";
+import { listDrivers } from "@/services/users";
+
+export const metadata: Metadata = { title: "Manage booking" };
+export const dynamic = "force-dynamic";
+
+export default async function AdminBookingDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  await requireRole(["admin", "dispatcher"]);
+  const { id } = await params;
+  const bookingId = Number(id);
+  if (!Number.isInteger(bookingId)) notFound();
+  const [detail, drivers, vehicles] = await Promise.all([getBookingDetail(bookingId), listDrivers(), listAssignableVehicles()]);
+  if (!detail) notFound();
+  const { booking: b } = detail;
+
+  return (
+    <>
+      <div className="mb-4 text-sm"><Link href="/admin/bookings" className="text-slate-500 hover:text-slate-900">← All bookings</Link></div>
+      <PageHeader
+        eyebrow={`${detail.vehicleType.name} · ${titleCase(b.paymentMethod)}`}
+        title={b.reference}
+        description={STATUS_META[b.status].description}
+        actions={<StatusBadge status={b.status} className="px-3 py-1 text-sm" />}
+      />
+
+      <div className="grid gap-6 xl:grid-cols-[1fr_400px]">
+        <div className="space-y-6">
+          <Card>
+            <CardHeader title="Customer" action={<Link href={`/admin/customers/${b.customerId}`} className="text-sm font-medium text-orange-600 hover:text-orange-700">View customer →</Link>} />
+            <div className="p-5">
+              <DescriptionList columns={3} items={[
+                { label: "Name", value: detail.customerName },
+                { label: "Company", value: detail.customerCompany ?? "—" },
+                { label: "Contact", value: <>{detail.customerEmail}<br />{detail.customerPhone ?? ""}</> },
+              ]} />
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader title="Route" />
+            <div className="grid gap-6 p-5 md:grid-cols-2">
+              {[
+                { label: "Pickup", dot: "bg-emerald-500", address: b.pickupAddress, contact: b.pickupContactName, phone: b.pickupContactPhone, instructions: b.pickupInstructions },
+                { label: "Delivery", dot: "bg-orange-500", address: b.dropoffAddress, contact: b.dropoffContactName, phone: b.dropoffContactPhone, instructions: b.dropoffInstructions },
+              ].map((s) => (
+                <div key={s.label}>
+                  <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500"><span className={`h-2.5 w-2.5 rounded-full ${s.dot}`} />{s.label}</div>
+                  <p className="mt-2 text-sm font-medium text-slate-900">{s.address}</p>
+                  {(s.contact || s.phone) && <p className="mt-1 text-sm text-slate-600">{[s.contact, s.phone].filter(Boolean).join(" · ")}</p>}
+                  {s.instructions && <p className="mt-2 rounded-lg bg-slate-50 p-2 text-xs text-slate-600">{s.instructions}</p>}
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader title="Job details" />
+            <div className="p-5">
+              <DescriptionList columns={3} items={[
+                { label: "Pickup time", value: <>{formatDateTime(b.scheduledAt)}{b.isAsap && <span className="ml-1 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-700">ASAP</span>}</> },
+                { label: "Distance", value: formatKm(b.distanceKm) },
+                { label: "Booked", value: formatDateTime(b.createdAt) },
+                { label: "Load", value: b.loadDescription },
+                { label: "Weight / pallets / items", value: `${b.weightKg ? `${b.weightKg.toLocaleString()} kg` : "—"} · ${b.pallets} pallets · ${b.itemCount ?? "—"} items` },
+                { label: "Extras", value: [b.requiresTailgate && "Tailgate lifter", b.requiresHandUnload && "Hand unload"].filter(Boolean).join(", ") || "None" },
+                { label: "Customer notes", value: b.customerNotes || "—" },
+                { label: "Driver", value: detail.driverName ? `${detail.driverName}${detail.driverPhone ? ` · ${detail.driverPhone}` : ""}` : "Unassigned" },
+                { label: "Vehicle", value: detail.vehicle ? `${detail.vehicle.registration}${detail.vehicle.make ? ` · ${detail.vehicle.make} ${detail.vehicle.model ?? ""}` : ""}` : "—" },
+                { label: "Quoted", value: formatMoney(b.quotedPriceCents) },
+                { label: "Final", value: b.finalPriceCents != null ? formatMoney(b.finalPriceCents) : "— (quoted price applies)" },
+                { label: "Milestones", value: <span className="text-xs">{[["Confirmed", b.confirmedAt], ["Assigned", b.assignedAt], ["Picked up", b.pickedUpAt], ["Delivered", b.deliveredAt], ["Completed", b.completedAt], ["Cancelled", b.cancelledAt]].filter(([, v]) => v).map(([l, v]) => `${l} ${formatDateTime(v as Date)}`).join(" · ") || "—"}</span> },
+              ]} />
+              {b.adminNotes && <Alert tone="info" title="Internal notes" className="mt-5">{b.adminNotes}</Alert>}
+              {b.cancellationReason && <Alert tone="warning" title="Cancellation reason" className="mt-5">{b.cancellationReason}</Alert>}
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader title="Timeline" />
+            <div className="p-5"><Timeline events={detail.events} /></div>
+          </Card>
+        </div>
+
+        <div>
+          <BookingManager
+            booking={{ id: b.id, status: b.status, driverId: b.driverId, vehicleId: b.vehicleId, vehicleTypeId: b.vehicleTypeId, quotedPriceCents: b.quotedPriceCents, finalPriceCents: b.finalPriceCents, adminNotes: b.adminNotes }}
+            drivers={drivers.map((d) => ({ id: d.id, name: d.name, vehicleId: d.vehicleId, vehicleRegistration: d.vehicleRegistration, activeJobs: d.activeJobs, status: d.status }))}
+            vehicles={vehicles}
+          />
+        </div>
+      </div>
+    </>
+  );
+}

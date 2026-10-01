@@ -1,0 +1,217 @@
+import { z } from "zod";
+import { BOOKING_STATUSES } from "@/lib/booking-rules";
+
+/** Optional free-text field: blank strings become undefined. */
+const optionalText = (max = 500) =>
+  z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().trim().max(max).optional(),
+  );
+
+const optionalInt = (min = 0, max = 1_000_000) =>
+  z.preprocess(
+    (v) => (v === "" || v === null ? undefined : v),
+    z.coerce.number().int().min(min).max(max).optional(),
+  );
+
+const password = z
+  .string()
+  .min(8, "Password must be at least 8 characters")
+  .max(128, "Password is too long");
+
+const email = z.email("Enter a valid email address").max(254).transform((v) => v.toLowerCase());
+const phone = optionalText(30);
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+export const registerSchema = z.object({
+  name: z.string().trim().min(2, "Enter your full name").max(120),
+  email,
+  phone,
+  companyName: optionalText(120),
+  password,
+});
+
+export const loginSchema = z.object({
+  email,
+  password: z.string().min(1, "Enter your password"),
+});
+
+export const forgotPasswordSchema = z.object({ email });
+
+export const resetPasswordSchema = z.object({
+  token: z.string().min(10, "Invalid reset token"),
+  password,
+});
+
+export const updateProfileSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  phone,
+  companyName: optionalText(120),
+});
+
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, "Enter your current password"),
+  newPassword: password,
+});
+
+// ---------------------------------------------------------------------------
+// Bookings
+// ---------------------------------------------------------------------------
+
+
+export const quoteSchema = z.object({
+  vehicleTypeId: z.coerce.number().int().positive("Choose a vehicle type"),
+  pickupAddress: z.string().trim().min(5, "Enter a full pickup address").max(300),
+  dropoffAddress: z.string().trim().min(5, "Enter a full delivery address").max(300),
+  distanceKm: z.preprocess(
+    (v) => (v === "" || v === null ? undefined : v),
+    z.coerce.number().min(0.1).max(5000).optional(),
+  ),
+  requiresTailgate: z.boolean().default(false),
+  requiresHandUnload: z.boolean().default(false),
+  isAsap: z.boolean().default(false),
+});
+
+export const createBookingSchema = z
+  .object({
+    vehicleTypeId: z.coerce.number().int().positive("Choose a vehicle type"),
+    pickupAddress: z.string().trim().min(5, "Enter a full pickup address").max(300),
+    pickupSuburb: optionalText(100),
+    pickupState: optionalText(10),
+    pickupPostcode: optionalText(10),
+    pickupContactName: optionalText(100),
+    pickupContactPhone: phone,
+    pickupInstructions: optionalText(500),
+    pickupLat: z.number().nullable().optional(),
+    pickupLng: z.number().nullable().optional(),
+    dropoffAddress: z.string().trim().min(5, "Enter a full delivery address").max(300),
+    dropoffSuburb: optionalText(100),
+    dropoffState: optionalText(10),
+    dropoffPostcode: optionalText(10),
+    dropoffContactName: optionalText(100),
+    dropoffContactPhone: phone,
+    dropoffInstructions: optionalText(500),
+    dropoffLat: z.number().nullable().optional(),
+    dropoffLng: z.number().nullable().optional(),
+    isAsap: z.boolean().default(false),
+    scheduledAt: z.preprocess(
+      (v) => (v === "" || v === null ? undefined : v),
+      z.coerce.date().optional(),
+    ),
+    loadDescription: z.string().trim().min(3, "Describe what is being moved").max(1000),
+    weightKg: optionalInt(0, 60_000),
+    pallets: z.preprocess((v) => (v === "" || v == null ? 0 : v), z.coerce.number().int().min(0).max(60)),
+    itemCount: optionalInt(0, 100_000),
+    requiresTailgate: z.boolean().default(false),
+    requiresHandUnload: z.boolean().default(false),
+    distanceKm: z.coerce.number().min(0.1, "Distance is required to price the job").max(5000),
+    paymentMethod: z.enum(["card", "account"]).default("card"),
+    customerNotes: optionalText(1000),
+  })
+  .superRefine((data, ctx) => {
+    if (!data.isAsap && !data.scheduledAt) {
+      ctx.addIssue({ code: "custom", path: ["scheduledAt"], message: "Choose a pickup date and time" });
+    }
+    if (!data.isAsap && data.scheduledAt && data.scheduledAt.getTime() < Date.now() - 10 * 60_000) {
+      ctx.addIssue({ code: "custom", path: ["scheduledAt"], message: "Pickup time must be in the future" });
+    }
+  });
+
+
+export const bookingListQuerySchema = z.object({
+  status: z.enum(BOOKING_STATUSES).optional(),
+  q: z.string().trim().max(100).optional(),
+  customerId: z.coerce.number().int().positive().optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+export const bookingActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("cancel"), reason: optionalText(500) }),
+  z.object({
+    action: z.literal("transition"),
+    status: z.enum(BOOKING_STATUSES),
+    note: optionalText(500),
+  }),
+  z.object({
+    action: z.literal("assign"),
+    driverId: z.coerce.number().int().positive(),
+    vehicleId: z.preprocess(
+      (v) => (v === "" || v === null ? undefined : v),
+      z.coerce.number().int().positive().optional(),
+    ),
+    note: optionalText(500),
+  }),
+  z.object({ action: z.literal("unassign"), note: optionalText(500) }),
+  z.object({
+    action: z.literal("update"),
+    finalPriceCents: z.preprocess(
+      (v) => (v === "" ? null : v),
+      z.coerce.number().int().min(0).nullable().optional(),
+    ),
+    adminNotes: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+      z.string().trim().max(2000).nullable().optional(),
+    ),
+  }),
+]);
+export type BookingAction = z.infer<typeof bookingActionSchema>;
+
+// ---------------------------------------------------------------------------
+// Admin: customers / fleet
+// ---------------------------------------------------------------------------
+
+export const customerListQuerySchema = z.object({
+  q: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+});
+
+export const updateUserStatusSchema = z.object({
+  status: z.enum(["active", "suspended"]),
+});
+
+export const vehicleTypeSchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .min(2)
+    .max(30)
+    .regex(/^[a-z0-9_]+$/, "Lowercase letters, numbers and underscores only"),
+  name: z.string().trim().min(2).max(80),
+  description: optionalText(300),
+  maxWeightKg: z.coerce.number().int().min(1).max(100_000),
+  maxLengthM: z.preprocess((v) => (v === "" || v == null ? undefined : v), z.coerce.number().min(0).max(50).optional()),
+  maxPallets: optionalInt(0, 60),
+  baseFareCents: z.coerce.number().int().min(0),
+  perKmRateCents: z.coerce.number().int().min(0),
+  minimumChargeCents: z.coerce.number().int().min(0).default(0),
+  active: z.boolean().default(true),
+  sortOrder: z.coerce.number().int().default(0),
+});
+export const vehicleTypeUpdateSchema = vehicleTypeSchema.partial();
+
+export const vehicleSchema = z.object({
+  vehicleTypeId: z.coerce.number().int().positive(),
+  registration: z.string().trim().min(2).max(12).transform((v) => v.toUpperCase()),
+  make: optionalText(60),
+  model: optionalText(60),
+  year: optionalInt(1980, 2100),
+  capacityKg: optionalInt(0, 100_000),
+  status: z.enum(["available", "in_use", "maintenance", "inactive"]).default("available"),
+  driverId: z.preprocess(
+    (v) => (v === "" || v === null ? null : v),
+    z.coerce.number().int().positive().nullable().optional(),
+  ),
+  notes: optionalText(500),
+});
+export const vehicleUpdateSchema = vehicleSchema.partial();
+
+export const createDriverSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email,
+  phone,
+  password,
+});
