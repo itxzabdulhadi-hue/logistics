@@ -4,6 +4,7 @@ import { BookingForm } from "@/components/booking-form";
 import { PageHeader } from "@/components/ui";
 import { isStaff, requireUser } from "@/lib/auth";
 import { listVehicleTypes } from "@/services/fleet";
+import { getPricingRules } from "@/services/pricing";
 
 export const metadata: Metadata = { title: "Book a truck" };
 export const dynamic = "force-dynamic";
@@ -11,12 +12,16 @@ export const dynamic = "force-dynamic";
 export default async function NewBookingPage() {
   const user = await requireUser();
   if (isStaff(user.role)) redirect("/admin/bookings");
-  const vehicleTypes = await listVehicleTypes({ activeOnly: true });
+  const [vehicleTypes, pricingRules] = await Promise.all([
+    listVehicleTypes({ activeOnly: true }),
+    getPricingRules(),
+  ]);
 
   return (
     <>
-      <PageHeader title="Book a truck" description="Get an instant fixed price. A dispatcher confirms your job and allocates a driver." />
+      <PageHeader title="Book a truck" description="Map your route, choose a vehicle, and get an itemized price before submitting." />
       <BookingForm
+        pricingRules={pricingRules}
         vehicleTypes={vehicleTypes.map((vt) => ({
           id: vt.id,
           name: vt.name,

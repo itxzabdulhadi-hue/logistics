@@ -282,7 +282,7 @@ export function DriversManager({ drivers }: { drivers: { id: number; name: strin
     <Card>
       <CardHeader
         title="Drivers"
-        description="Driver accounts can be allocated to jobs. The driver app ships in Phase 2."
+        description="Driver accounts can be allocated to jobs. Driver execution tools are planned for a future phase."
         action={<Button size="sm" variant={adding ? "secondary" : "primary"} onClick={() => setAdding((a) => !a)}>{adding ? "Close" : "+ Add driver"}</Button>}
       />
       {error && <div className="px-5 pt-4"><Alert tone="error">{error}</Alert></div>}

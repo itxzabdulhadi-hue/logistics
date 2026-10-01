@@ -22,8 +22,10 @@ import {
   canTransition,
   generateReference,
 } from "@/lib/booking-rules";
+import { estimateDrivingRoute } from "@/lib/geocode";
 import { logger } from "@/lib/logger";
 import type { createBookingSchema } from "@/lib/validation";
+import { getPricingRules } from "@/services/pricing";
 
 type CreateBookingInput = z.infer<typeof createBookingSchema>;
 type Actor = Pick<SafeUser, "id" | "role" | "name">;
@@ -51,12 +53,26 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
     throw errors.validation({ pallets: `A ${vt.name} carries at most ${vt.maxPallets} pallets` });
   }
 
+  // Never accept client-supplied distance or coordinates as pricing inputs. Resolve the
+  // entered addresses and recalculate the complete road route on the server at booking time.
+  const [route, pricingRules] = await Promise.all([
+    estimateDrivingRoute(input),
+    getPricingRules(),
+  ]);
+  if (!route) {
+    throw errors.validation(
+      { route: "We couldn't map a driving route for every address. Choose a suggested address or check the spelling, then try again." },
+      "Route unavailable",
+    );
+  }
   const quote = calculateQuote({
     vehicleType: vt,
-    distanceKm: input.distanceKm,
+    distanceKm: route.distanceKm,
+    additionalStops: input.additionalStops.length,
     requiresTailgate: input.requiresTailgate,
     requiresHandUnload: input.requiresHandUnload,
     isAsap: input.isAsap,
+    pricingRules,
   });
   const scheduledAt = input.isAsap ? new Date(Date.now() + 60 * 60 * 1000) : input.scheduledAt!;
 
@@ -84,8 +100,8 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
       pickupContactName: input.pickupContactName ?? null,
       pickupContactPhone: input.pickupContactPhone ?? null,
       pickupInstructions: input.pickupInstructions ?? null,
-      pickupLat: input.pickupLat ?? null,
-      pickupLng: input.pickupLng ?? null,
+      pickupLat: route.pickup.lat,
+      pickupLng: route.pickup.lng,
       dropoffAddress: input.dropoffAddress,
       dropoffSuburb: input.dropoffSuburb ?? null,
       dropoffState: input.dropoffState ?? null,
@@ -93,8 +109,13 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
       dropoffContactName: input.dropoffContactName ?? null,
       dropoffContactPhone: input.dropoffContactPhone ?? null,
       dropoffInstructions: input.dropoffInstructions ?? null,
-      dropoffLat: input.dropoffLat ?? null,
-      dropoffLng: input.dropoffLng ?? null,
+      dropoffLat: route.dropoff.lat,
+      dropoffLng: route.dropoff.lng,
+      additionalStops: route.stops.map((point, index) => ({
+        address: input.additionalStops[index]?.address ?? point.label,
+        lat: point.lat,
+        lng: point.lng,
+      })),
       isAsap: input.isAsap,
       scheduledAt,
       loadDescription: input.loadDescription,
@@ -104,6 +125,7 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
       requiresTailgate: input.requiresTailgate,
       requiresHandUnload: input.requiresHandUnload,
       distanceKm: quote.distanceKm,
+      estimatedDurationMinutes: Math.ceil(route.durationSeconds / 60),
       quotedPriceCents: quote.totalCents,
       paymentMethod: input.paymentMethod,
       customerNotes: input.customerNotes ?? null,

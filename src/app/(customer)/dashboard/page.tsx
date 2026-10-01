@@ -30,8 +30,8 @@ export default async function DashboardPage() {
       />
 
       {user.role === "driver" && (
-        <Alert tone="info" title="Driver app coming in Phase 2" className="mb-6">
-          Your account has the driver role. Job execution tools for drivers ship in the next phase — for now dispatch will progress your jobs.
+        <Alert tone="info" title="Driver tools are planned for a future phase" className="mb-6">
+          Your account has the driver role. For now, dispatch will progress your assigned jobs.
         </Alert>
       )}
 

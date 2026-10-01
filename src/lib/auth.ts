@@ -7,7 +7,6 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { users, type User, type UserRole } from "@/db/schema";
 import { errors } from "@/lib/api";
-import { logger } from "@/lib/logger";
 
 const scrypt = promisify(scryptCb);
 
@@ -45,16 +44,12 @@ export const SESSION_COOKIE = "ll_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
 function getSecret() {
-  const secret = process.env.AUTH_SECRET;
-  if (!secret) {
-    if (process.env.NODE_ENV === "production") {
-      logger.warn("auth.secret.missing", {
-        hint: "Set AUTH_SECRET in the environment; falling back to an insecure default.",
-      });
-    }
-    return new TextEncoder().encode("loadline-dev-secret-change-me-please-0001");
+  const secret = process.env.AUTH_SECRET?.trim();
+  if (process.env.NODE_ENV === "production") {
+    if (!secret) throw new Error("AUTH_SECRET must be set in production");
+    if (secret.length < 32) throw new Error("AUTH_SECRET must be at least 32 characters in production");
   }
-  return new TextEncoder().encode(secret);
+  return new TextEncoder().encode(secret || "loadline-dev-secret-change-me-please-0001");
 }
 
 export type SessionPayload = { sub: string; role: UserRole; email: string };
@@ -69,8 +64,9 @@ export async function signSession(payload: SessionPayload) {
 }
 
 export async function verifySession(token: string): Promise<SessionPayload | null> {
+  const secret = getSecret();
   try {
-    const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
+    const { payload } = await jwtVerify(token, secret, { algorithms: ["HS256"] });
     if (!payload.sub) return null;
     return {
       sub: payload.sub,

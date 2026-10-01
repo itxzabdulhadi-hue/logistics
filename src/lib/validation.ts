@@ -58,18 +58,26 @@ export const changePasswordSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Bookings
+// Routes, quotes & bookings
 // ---------------------------------------------------------------------------
 
+const routeStopSchema = z.object({
+  address: z.string().trim().min(5, "Enter a full stop address").max(300),
+});
+const additionalStopsSchema = z.array(routeStopSchema).max(4, "A route can include up to 4 additional stops").default([]);
 
-export const quoteSchema = z.object({
-  vehicleTypeId: z.coerce.number().int().positive("Choose a vehicle type"),
+export const addressAutocompleteQuerySchema = z.object({
+  q: z.string().trim().min(3).max(160),
+});
+
+export const routeEstimateSchema = z.object({
   pickupAddress: z.string().trim().min(5, "Enter a full pickup address").max(300),
   dropoffAddress: z.string().trim().min(5, "Enter a full delivery address").max(300),
-  distanceKm: z.preprocess(
-    (v) => (v === "" || v === null ? undefined : v),
-    z.coerce.number().min(0.1).max(5000).optional(),
-  ),
+  additionalStops: additionalStopsSchema,
+});
+
+export const quoteSchema = routeEstimateSchema.extend({
+  vehicleTypeId: z.coerce.number().int().positive("Choose a vehicle type"),
   requiresTailgate: z.boolean().default(false),
   requiresHandUnload: z.boolean().default(false),
   isAsap: z.boolean().default(false),
@@ -96,6 +104,7 @@ export const createBookingSchema = z
     dropoffInstructions: optionalText(500),
     dropoffLat: z.number().nullable().optional(),
     dropoffLng: z.number().nullable().optional(),
+    additionalStops: additionalStopsSchema,
     isAsap: z.boolean().default(false),
     scheduledAt: z.preprocess(
       (v) => (v === "" || v === null ? undefined : v),
@@ -107,7 +116,11 @@ export const createBookingSchema = z
     itemCount: optionalInt(0, 100_000),
     requiresTailgate: z.boolean().default(false),
     requiresHandUnload: z.boolean().default(false),
-    distanceKm: z.coerce.number().min(0.1, "Distance is required to price the job").max(5000),
+    // Accepted for compatibility with older clients; the service always recalculates route distance server-side.
+    distanceKm: z.preprocess(
+      (v) => (v === "" || v === null ? undefined : v),
+      z.coerce.number().min(0.1).max(5000).optional(),
+    ),
     paymentMethod: z.enum(["card", "account"]).default("card"),
     customerNotes: optionalText(1000),
   })
@@ -192,6 +205,14 @@ export const vehicleTypeSchema = z.object({
   sortOrder: z.coerce.number().int().default(0),
 });
 export const vehicleTypeUpdateSchema = vehicleTypeSchema.partial();
+
+export const pricingRulesSchema = z.object({
+  additionalStopFeeCents: z.coerce.number().int().min(0).max(10_000_000),
+  tailgateFeeCents: z.coerce.number().int().min(0).max(10_000_000),
+  handUnloadFeeCents: z.coerce.number().int().min(0).max(10_000_000),
+  asapSurchargeBasisPoints: z.coerce.number().int().min(0).max(10_000),
+  gstRateBasisPoints: z.coerce.number().int().min(0).max(10_000),
+});
 
 export const vehicleSchema = z.object({
   vehicleTypeId: z.coerce.number().int().positive(),

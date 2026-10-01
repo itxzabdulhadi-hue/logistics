@@ -1,15 +1,13 @@
 import { errors, handle, json, parseJson } from "@/lib/api";
 import { calculateQuote } from "@/lib/booking-rules";
-import { estimateDistance } from "@/lib/geocode";
+import { estimateDrivingRoute } from "@/lib/geocode";
 import { quoteSchema } from "@/lib/validation";
+import { getPricingRules } from "@/services/pricing";
 import { getVehicleType } from "@/services/fleet";
 
 export const dynamic = "force-dynamic";
 
-/**
- * Price estimate. Distance is geocoded from the addresses when not supplied;
- * if geocoding is unavailable the client is asked to provide a manual distance.
- */
+/** Recalculate an itemized quote from a routed journey and current server-side rates. */
 export const POST = handle(async (req) => {
   const input = await parseJson(req, quoteSchema);
   const vehicleType = await getVehicleType(input.vehicleTypeId);
@@ -17,42 +15,23 @@ export const POST = handle(async (req) => {
     throw errors.validation({ vehicleTypeId: "This vehicle type is not available" });
   }
 
-  let distanceKm = input.distanceKm;
-  let distanceSource: "manual" | "geocoded" = "manual";
-  let pickup: { lat: number; lng: number; label: string } | null = null;
-  let dropoff: { lat: number; lng: number; label: string } | null = null;
-
-  if (!distanceKm) {
-    const estimate = await estimateDistance(input.pickupAddress, input.dropoffAddress);
-    if (!estimate) {
-      return json({
-        quote: null,
-        distanceSource: null,
-        needsManualDistance: true,
-        message:
-          "We couldn't locate one of the addresses automatically. Enter the approximate trip distance to get a price.",
-      });
-    }
-    distanceKm = estimate.distanceKm;
-    distanceSource = "geocoded";
-    pickup = estimate.pickup;
-    dropoff = estimate.dropoff;
+  const route = await estimateDrivingRoute(input);
+  if (!route) {
+    throw errors.validation(
+      { route: "We couldn't map a driving route for every address. Choose a suggested address or check the spelling, then try again." },
+      "Route unavailable",
+    );
   }
-
+  const pricingRules = await getPricingRules();
   const quote = calculateQuote({
     vehicleType,
-    distanceKm,
+    distanceKm: route.distanceKm,
+    additionalStops: input.additionalStops.length,
     requiresTailgate: input.requiresTailgate,
     requiresHandUnload: input.requiresHandUnload,
     isAsap: input.isAsap,
+    pricingRules,
   });
 
-  return json({
-    quote,
-    distanceSource,
-    needsManualDistance: false,
-    vehicleType: { id: vehicleType.id, name: vehicleType.name },
-    pickup,
-    dropoff,
-  });
+  return json({ quote, route, vehicleType: { id: vehicleType.id, name: vehicleType.name }, pricingRules });
 });

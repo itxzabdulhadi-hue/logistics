@@ -5,7 +5,7 @@ import { BookingManager } from "@/components/admin/booking-manager";
 import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
 import { requireRole } from "@/lib/auth";
 import { STATUS_META } from "@/lib/booking-rules";
-import { formatDateTime, formatKm, formatMoney, titleCase } from "@/lib/utils";
+import { formatDateTime, formatDuration, formatKm, formatMoney, titleCase } from "@/lib/utils";
 import { getBookingDetail } from "@/services/bookings";
 import { listAssignableVehicles } from "@/services/fleet";
 import { listDrivers } from "@/services/users";
@@ -21,6 +21,14 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
   const [detail, drivers, vehicles] = await Promise.all([getBookingDetail(bookingId), listDrivers(), listAssignableVehicles()]);
   if (!detail) notFound();
   const { booking: b } = detail;
+  const directionsUrl = new URL("https://www.google.com/maps/dir/");
+  directionsUrl.searchParams.set("api", "1");
+  directionsUrl.searchParams.set("origin", b.pickupAddress);
+  directionsUrl.searchParams.set("destination", b.dropoffAddress);
+  if (b.additionalStops?.length) {
+    directionsUrl.searchParams.set("waypoints", b.additionalStops.map((stop) => stop.address).join("|"));
+  }
+  directionsUrl.searchParams.set("travelmode", "driving");
 
   return (
     <>
@@ -46,10 +54,14 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
           </Card>
 
           <Card>
-            <CardHeader title="Route" />
+            <CardHeader
+              title="Route"
+              action={<a href={directionsUrl.toString()} target="_blank" rel="noreferrer" className="text-xs font-semibold text-orange-700 hover:text-orange-800">Open in Google Maps ↗</a>}
+            />
             <div className="grid gap-6 p-5 md:grid-cols-2">
               {[
                 { label: "Pickup", dot: "bg-emerald-500", address: b.pickupAddress, contact: b.pickupContactName, phone: b.pickupContactPhone, instructions: b.pickupInstructions },
+                ...(b.additionalStops ?? []).map((stop, index) => ({ label: `Stop ${index + 1}`, dot: "bg-slate-500", address: stop.address, contact: null, phone: null, instructions: null })),
                 { label: "Delivery", dot: "bg-orange-500", address: b.dropoffAddress, contact: b.dropoffContactName, phone: b.dropoffContactPhone, instructions: b.dropoffInstructions },
               ].map((s) => (
                 <div key={s.label}>
@@ -67,7 +79,8 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
             <div className="p-5">
               <DescriptionList columns={3} items={[
                 { label: "Pickup time", value: <>{formatDateTime(b.scheduledAt)}{b.isAsap && <span className="ml-1 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-700">ASAP</span>}</> },
-                { label: "Distance", value: formatKm(b.distanceKm) },
+                { label: "Road distance", value: formatKm(b.distanceKm) },
+                { label: "Estimated drive", value: b.estimatedDurationMinutes != null ? formatDuration(b.estimatedDurationMinutes * 60) : "—" },
                 { label: "Booked", value: formatDateTime(b.createdAt) },
                 { label: "Load", value: b.loadDescription },
                 { label: "Weight / pallets / items", value: `${b.weightKg ? `${b.weightKg.toLocaleString()} kg` : "—"} · ${b.pallets} pallets · ${b.itemCount ?? "—"} items` },

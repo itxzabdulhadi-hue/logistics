@@ -1,8 +1,10 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
   doublePrecision,
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   serial,
@@ -113,6 +115,17 @@ export const vehicleTypes = pgTable("vehicle_types", {
     .defaultNow(),
 });
 
+/** Singleton, administrator-managed rates used by every new quote. Percentages use basis points. */
+export const pricingRules = pgTable("pricing_rules", {
+  id: integer("id").primaryKey().default(1),
+  additionalStopFeeCents: integer("additional_stop_fee_cents").notNull().default(1500),
+  tailgateFeeCents: integer("tailgate_fee_cents").notNull().default(2500),
+  handUnloadFeeCents: integer("hand_unload_fee_cents").notNull().default(4500),
+  asapSurchargeBasisPoints: integer("asap_surcharge_basis_points").notNull().default(1500),
+  gstRateBasisPoints: integer("gst_rate_basis_points").notNull().default(1000),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const vehicles = pgTable(
   "vehicles",
   {
@@ -146,6 +159,8 @@ export const vehicles = pgTable(
 // ---------------------------------------------------------------------------
 // Bookings
 // ---------------------------------------------------------------------------
+
+export type BookingStop = { address: string; lat: number; lng: number };
 
 export const bookings = pgTable(
   "bookings",
@@ -187,6 +202,10 @@ export const bookings = pgTable(
     dropoffInstructions: text("dropoff_instructions"),
     dropoffLat: doublePrecision("dropoff_lat"),
     dropoffLng: doublePrecision("dropoff_lng"),
+    additionalStops: jsonb("additional_stops")
+      .$type<BookingStop[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
 
     // Schedule
     isAsap: boolean("is_asap").notNull().default(false),
@@ -204,6 +223,7 @@ export const bookings = pgTable(
 
     // Money
     distanceKm: doublePrecision("distance_km"),
+    estimatedDurationMinutes: integer("estimated_duration_minutes"),
     quotedPriceCents: integer("quoted_price_cents").notNull(),
     finalPriceCents: integer("final_price_cents"),
     currency: text("currency").notNull().default("AUD"),

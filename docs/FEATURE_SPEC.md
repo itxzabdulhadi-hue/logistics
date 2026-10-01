@@ -1,4 +1,4 @@
-# Loadline — Feature Specification (Phase 0 → Phase 1)
+# Loadline — Feature Specification (Phases 0–2)
 
 ## 1. Personas
 
@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | **Customer** | Businesses (warehouses, retailers, builders) and individuals needing a truck now or at a scheduled time | Book the right truck quickly, know the price up front, see what is happening with the job. |
 | **Admin / Dispatcher** | Loadline operations staff | Keep every job moving: confirm, price, assign the right driver + vehicle, resolve problems, manage the fleet and customers. |
-| **Driver** (Phase 2) | Owner-drivers and fleet drivers | See assigned jobs, execute them step by step, capture proof of delivery. |
+| **Driver** (future phase) | Owner-drivers and fleet drivers | See assigned jobs, execute them step by step, capture proof of delivery. |
 
 ---
 
@@ -15,13 +15,13 @@
 1. **Discover & register** — landing page explains the service and vehicle classes; the customer registers with name, email, phone, optional company name, password. Registration logs them in.
 2. **Dashboard** — KPIs (active jobs, completed jobs, total spend, next pickup), a prominent **Book a truck** call-to-action, and the latest bookings.
 3. **Create booking**
-   1. Choose vehicle class (cards with capacity + rate guidance).
-   2. Enter pickup and delivery addresses + on-site contacts and instructions.
-   3. Choose ASAP or a scheduled pickup date/time.
-   4. Describe the load (description, weight, pallets, item count) and extras (tailgate, hand unload).
-   5. Click **Get quote** → live price breakdown (base, distance, extras, GST). If the address cannot be geocoded the customer enters an approximate distance.
-   6. Select payment method (card / on account), add notes, **Confirm booking**.
-   7. Redirect to the booking detail page with the booking reference; status is `pending`.
+   1. Enter pickup and delivery addresses with autocomplete; add up to four ordered stops when needed.
+   2. Calculate a driving route → review its map, road distance and estimated drive time.
+   3. Choose a vehicle class based on capacity, then describe the load (weight, pallets, item count).
+   4. Choose ASAP or a scheduled pickup time and any additional services (tailgate lifter, hand unload).
+   5. Review the itemized quote (base fare, routed distance, minimum adjustment, stop/service fees, ASAP surcharge, GST).
+   6. Add on-site contacts, instructions and payment method, then **Confirm booking**.
+   7. The server resolves the route and recalculates the price at submission; redirect to the booking detail page with the reference and status `pending`.
 4. **Booking history** — table of all bookings with status filter, free-text search (reference / address), pagination.
 5. **Booking details** — reference, status badge, route, schedule, load, driver/vehicle (once assigned), price (quoted vs final), status timeline with dispatcher notes, **Cancel booking** (allowed while `pending`, `confirmed`, `assigned`).
 6. **Profile** — update name/phone/company, change password.
@@ -41,9 +41,9 @@
    * **Vehicles**: create/edit/delete units, status (available / in use / maintenance / inactive), link to a driver.
    * **Drivers**: create driver accounts, see linked vehicle.
 
-## 4. Driver journey (Phase 2 — designed, not built)
+## 4. Driver journey (future phase — not built)
 
-Login → "My jobs" (assigned, ordered by pickup time) → job detail with addresses/contacts → buttons: *On my way*, *Picked up*, *Delivered* (photo + signature POD) → job history. The Phase 1 schema (driver role, `driver_id` on bookings, `vehicles.driver_id`, event log, lat/lng) supports this without migration.
+Login → "My jobs" (assigned, ordered by pickup time) → job detail with addresses/contacts → buttons: *On my way*, *Picked up*, *Delivered* (photo + signature POD) → job history. The schema (driver role, `driver_id` on bookings, `vehicles.driver_id`, event log, lat/lng) supports this without changing the booking workflow.
 
 ---
 
@@ -112,3 +112,25 @@ Login → "My jobs" (assigned, ordered by pickup time) → job detail with addre
 3. Log in as admin → booking appears in `/admin/bookings` and the dashboard "needs dispatch" list.
 4. Confirm → assign driver + vehicle → progress to delivered → completed; each step appears in the customer's timeline.
 5. Customer can cancel a different pending booking; admin sees it as cancelled.
+
+---
+
+## 7. Phase 2 — Maps & quotation (implemented)
+
+### Customer booking flow
+- [x] Route first: pickup, drop-off and up to four ordered additional stops.
+- [x] Debounced address autocomplete scoped to Australia.
+- [x] Server-side geocoding and real road routing; show route distance, estimated driving time and route visualization.
+- [x] Select vehicle and enter load details after the route is mapped.
+- [x] Live itemized quote with base fare, distance, minimum-charge adjustment, additional stops, services, ASAP surcharge and GST.
+- [x] Confirmation step with site contacts, instructions, payment method and booking summary.
+- [x] Re-resolve route and recalculate price server-side when the booking is created; never trust browser distance/coordinates.
+- [x] Persist stop order, stop coordinates, routed distance, estimated duration and quoted total.
+
+### Admin pricing
+- [x] Configure per-stop, tailgate, hand-unload, ASAP surcharge and GST rates at `/admin/pricing` (admin only).
+- [x] Continue to configure vehicle base fare, per-kilometre rate and minimum fare under Fleet → vehicle classes.
+
+### Maps provider
+
+Autocomplete and geocoding use Photon; driving routes use OSRM; the embedded route preview uses OpenStreetMap tiles and includes attribution. Google Maps directions are also available as an external link. The public demo endpoints require no API key but have no production SLA; a production deployment should use a contracted or self-hosted provider.

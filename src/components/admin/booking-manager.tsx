@@ -121,7 +121,7 @@ export function BookingManager({ booking, drivers, vehicles }: Props) {
             </Field>
             <Field label="Vehicle" error={fields.vehicleId} hint="Defaults to the driver's usual vehicle.">
               <Select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)}>
-                <option value="">Driver's own vehicle / decide later</option>
+                <option value="">Driver&apos;s own vehicle / decide later</option>
                 {matchingVehicles.length > 0 && (
                   <optgroup label="Matching vehicle class">
                     {matchingVehicles.map((v) => (
