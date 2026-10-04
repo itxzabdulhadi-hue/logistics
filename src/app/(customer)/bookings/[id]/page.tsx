@@ -19,6 +19,7 @@ export default async function BookingDetailPage({
   searchParams: Promise<{ created?: string }>;
 }) {
   const user = await requireUser();
+  if (user.role === "driver") redirect("/driver");
   const { id } = await params;
   const { created } = await searchParams;
   const bookingId = Number(id);
@@ -28,7 +29,7 @@ export default async function BookingDetailPage({
   const detail = await getBookingDetail(bookingId);
   if (!detail) notFound();
   const { booking: b } = detail;
-  const ownsIt = b.customerId === user.id || (user.role === "driver" && b.driverId === user.id);
+  const ownsIt = b.customerId === user.id;
   if (!ownsIt) notFound();
 
   const canCancel = b.customerId === user.id && CUSTOMER_CANCELLABLE.includes(b.status);

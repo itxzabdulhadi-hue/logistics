@@ -161,7 +161,8 @@ export function isStaff(role: UserRole) {
 }
 
 export function homeForRole(role: UserRole) {
-  return isStaff(role) ? "/admin" : "/dashboard";
+  if (isStaff(role)) return "/admin";
+  return role === "driver" ? "/driver" : "/dashboard";
 }
 
 /** Load the current user from the session cookie (null when signed out / suspended). */

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { BookingsTable } from "@/components/bookings-table";
-import { Alert, Card, CardHeader, LinkButton, PageHeader, StatCard } from "@/components/ui";
+import { Card, CardHeader, LinkButton, PageHeader, StatCard } from "@/components/ui";
 import { isStaff, requireUser } from "@/lib/auth";
 import { formatDateTime, formatMoney } from "@/lib/utils";
 import { getCustomerStats, listBookings } from "@/services/bookings";
@@ -13,6 +13,7 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage() {
   const user = await requireUser();
   if (isStaff(user.role)) redirect("/admin");
+  if (user.role === "driver") redirect("/driver");
 
   const [stats, recent] = await Promise.all([
     getCustomerStats(user.id),
@@ -28,12 +29,6 @@ export default async function DashboardPage() {
         description="Here's what's happening with your deliveries."
         actions={<LinkButton href="/bookings/new" size="lg">+ Book a truck</LinkButton>}
       />
-
-      {user.role === "driver" && (
-        <Alert tone="info" title="Driver tools are planned for a future phase" className="mb-6">
-          Your account has the driver role. For now, dispatch will progress your assigned jobs.
-        </Alert>
-      )}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Active jobs" value={stats.active} tone="orange" hint="Pending through delivered" />

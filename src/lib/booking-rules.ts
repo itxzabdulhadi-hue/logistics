@@ -80,6 +80,23 @@ export const ACTIVE_STATUSES: BookingStatus[] = [
   "in_transit",
   "delivered",
 ];
+
+/** A driver/vehicle is held while an assigned job is open; pending and confirmed jobs do not reserve resources. */
+export const ASSIGNED_STATUSES: BookingStatus[] = [
+  "assigned",
+  "en_route_pickup",
+  "picked_up",
+  "in_transit",
+  "delivered",
+];
+
+export const DRIVER_TRANSITIONS: Partial<Record<BookingStatus, BookingStatus[]>> = {
+  assigned: ["en_route_pickup"],
+  en_route_pickup: ["picked_up", "failed"],
+  picked_up: ["in_transit"],
+  in_transit: ["delivered", "failed"],
+};
+
 export const TERMINAL_STATUSES: BookingStatus[] = ["completed", "cancelled", "failed"];
 export const CUSTOMER_CANCELLABLE: BookingStatus[] = ["pending", "confirmed", "assigned"];
 

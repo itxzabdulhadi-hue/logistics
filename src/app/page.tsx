@@ -28,7 +28,7 @@ export default async function HomePage() {
           <nav className="flex items-center gap-3">
             {user ? (
               <LinkButton href={homeForRole(user.role)} size="sm">
-                Go to {user.role === "admin" || user.role === "dispatcher" ? "dispatch console" : "dashboard"}
+                Go to {user.role === "admin" || user.role === "dispatcher" ? "dispatch console" : user.role === "driver" ? "driver workspace" : "dashboard"}
               </LinkButton>
             ) : (
               <>
@@ -85,6 +85,7 @@ export default async function HomePage() {
                 ["Customer", "customer@loadline.demo", "Customer123!"],
                 ["Dispatcher", "dispatch@loadline.demo", "Dispatch123!"],
                 ["Admin", "admin@loadline.demo", "Admin123!"],
+                ["Driver", "driver@loadline.demo", "Driver123!"],
               ].map(([role, email, pw]) => (
                 <li key={role} className="flex items-center justify-between gap-4 rounded-xl bg-slate-800/60 px-4 py-3">
                   <span className="font-semibold text-white">{role}</span>
@@ -156,7 +157,7 @@ export default async function HomePage() {
       <footer className="border-t border-slate-200 py-10">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 text-sm text-slate-500">
           <Brand dark={false} />
-          <p>Route-based quoting + dispatch console. Driver tools are planned for a future phase.</p>
+          <p>Route-based quotes, capacity-aware dispatch and a driver workspace to keep jobs moving.</p>
         </div>
       </footer>
     </div>

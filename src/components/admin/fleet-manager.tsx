@@ -1,22 +1,25 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { Alert, Badge, Button, Card, CardHeader, Checkbox, Field, Input, Select, Textarea, VehicleStatusBadge } from "@/components/ui";
 import { api, errorMessage, fieldErrors } from "@/lib/client-api";
-import { formatMoney } from "@/lib/utils";
+import { formatDateTime, formatMoney } from "@/lib/utils";
 
 type VehicleType = {
   id: number; code: string; name: string; description: string | null; maxWeightKg: number; maxLengthM: number | null;
   maxPallets: number | null; baseFareCents: number; perKmRateCents: number; minimumChargeCents: number; active: boolean; sortOrder: number;
 };
 type VehicleRow = {
-  vehicle: { id: number; registration: string; make: string | null; model: string | null; year: number | null; capacityKg: number | null; status: string; driverId: number | null; vehicleTypeId: number; notes: string | null };
+  vehicle: { id: number; registration: string; make: string | null; model: string | null; year: number | null; capacityKg: number | null; status: string; driverId: number | null; vehicleTypeId: number; notes: string | null; currentLocation: string | null; locationUpdatedAt: Date | null };
   typeName: string;
+  typeMaxWeightKg: number;
   driverName: string | null;
 };
-type Driver = { id: number; name: string };
+type Driver = { id: number; name: string; vehicleId: number | null; status: string };
 
+const MANUAL_VEHICLE_STATUSES = ["available", "maintenance", "inactive"] as const;
 const VEHICLE_STATUSES = ["available", "in_use", "maintenance", "inactive"] as const;
 
 function useAction() {
@@ -46,6 +49,30 @@ function useAction() {
 const values = (e: FormEvent<HTMLFormElement>) => Object.fromEntries(new FormData(e.currentTarget).entries()) as Record<string, string>;
 const dollarsToCents = (v: string) => Math.round(Number(v || 0) * 100);
 
+function VehicleLocationCell({
+  value,
+  busy,
+  onSave,
+}: {
+  value: string | null;
+  busy: boolean;
+  onSave: (location: string) => Promise<void>;
+}) {
+  const [location, setLocation] = useState(value ?? "");
+  return (
+    <form
+      className="flex min-w-56 items-center gap-2"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        await onSave(location);
+      }}
+    >
+      <Input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Set current location" aria-label="Vehicle current location" />
+      <Button type="submit" size="sm" variant="secondary" disabled={busy || location === (value ?? "")}>Save</Button>
+    </form>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Vehicles
 // ---------------------------------------------------------------------------
@@ -53,13 +80,14 @@ const dollarsToCents = (v: string) => Math.round(Number(v || 0) * 100);
 export function VehiclesManager({ vehicles, vehicleTypes, drivers }: { vehicles: VehicleRow[]; vehicleTypes: VehicleType[]; drivers: Driver[] }) {
   const { busy, error, fields, run } = useAction();
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null);
 
   return (
     <Card>
       <CardHeader
         title="Vehicles"
         description={`${vehicles.length} units in the fleet.`}
-        action={<Button size="sm" variant={adding ? "secondary" : "primary"} onClick={() => setAdding((a) => !a)}>{adding ? "Close" : "+ Add vehicle"}</Button>}
+        action={<Button size="sm" variant={adding ? "secondary" : "primary"} onClick={() => { setAdding((a) => !a); setEditing(null); }}>{adding ? "Close" : "+ Add vehicle"}</Button>}
       />
       {error && <div className="px-5 pt-4"><Alert tone="error">{error}</Alert></div>}
       {adding && (
@@ -85,14 +113,15 @@ export function VehiclesManager({ vehicles, vehicleTypes, drivers }: { vehicles:
           <Field label="Make" error={fields.make}><Input name="make" placeholder="Isuzu" /></Field>
           <Field label="Model" error={fields.model}><Input name="model" placeholder="NLR 45-150" /></Field>
           <Field label="Year" error={fields.year}><Input name="year" type="number" min={1980} max={2100} /></Field>
-          <Field label="Capacity (kg)" error={fields.capacityKg}><Input name="capacityKg" type="number" min={0} /></Field>
+          <Field label="Capacity (kg)" error={fields.capacityKg} hint="Leave blank to use the class limit."><Input name="capacityKg" type="number" min={1} /></Field>
           <Field label="Status" error={fields.status}>
-            <Select name="status" defaultValue="available">{VEHICLE_STATUSES.map((s) => <option key={s} value={s}>{s.replace("_", " ")}</option>)}</Select>
+            <Select name="status" defaultValue="available">{MANUAL_VEHICLE_STATUSES.map((s) => <option key={s} value={s}>{s.replace("_", " ")}</option>)}</Select>
           </Field>
           <Field label="Driver" error={fields.driverId}>
-            <Select name="driverId" defaultValue=""><option value="">Unassigned</option>{drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</Select>
+            <Select name="driverId" defaultValue=""><option value="">Unassigned</option>{drivers.filter((d) => d.status === "active" && d.vehicleId == null).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</Select>
           </Field>
-          <Field label="Notes" error={fields.notes} className="sm:col-span-2 lg:col-span-3"><Input name="notes" /></Field>
+          <Field label="Current location" error={fields.currentLocation}><Input name="currentLocation" placeholder="e.g. Alexandria depot" /></Field>
+          <Field label="Notes" error={fields.notes} className="sm:col-span-2 lg:col-span-2"><Input name="notes" /></Field>
           <div className="flex items-end"><Button type="submit" loading={busy === "create"} className="w-full">Save vehicle</Button></div>
         </form>
       )}
@@ -101,56 +130,207 @@ export function VehiclesManager({ vehicles, vehicleTypes, drivers }: { vehicles:
           <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">
             <tr>
               <th className="px-5 py-3">Rego</th><th className="px-5 py-3">Class</th><th className="px-5 py-3">Make / model</th>
-              <th className="px-5 py-3">Capacity</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Driver</th><th className="px-5 py-3" />
+              <th className="px-5 py-3">Capacity</th><th className="px-5 py-3">Location</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Driver</th><th className="px-5 py-3" />
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {vehicles.length === 0 && <tr><td colSpan={7} className="px-5 py-10 text-center text-slate-500">No vehicles yet.</td></tr>}
-            {vehicles.map(({ vehicle: v, typeName }) => (
-              <tr key={v.id}>
-                <td className="px-5 py-3 font-semibold text-slate-900">{v.registration}</td>
-                <td className="px-5 py-3 text-slate-700">{typeName}</td>
-                <td className="px-5 py-3 text-slate-700">{[v.make, v.model, v.year].filter(Boolean).join(" ") || "—"}</td>
-                <td className="px-5 py-3 text-slate-700">{v.capacityKg ? `${v.capacityKg.toLocaleString()} kg` : "—"}</td>
-                <td className="px-5 py-3">
-                  <div className="flex items-center gap-2">
-                    <VehicleStatusBadge status={v.status} />
-                    <Select
-                      className="w-36 py-1 text-xs"
-                      value={v.status}
-                      disabled={busy !== null}
-                      onChange={(e) => run(`status-${v.id}`, async () => { await api(`/api/admin/vehicles/${v.id}`, { method: "PATCH", body: { status: e.target.value } }); })}
-                    >
-                      {VEHICLE_STATUSES.map((s) => <option key={s} value={s}>{s.replace("_", " ")}</option>)}
-                    </Select>
-                  </div>
-                </td>
-                <td className="px-5 py-3">
-                  <Select
-                    className="w-44 py-1 text-xs"
-                    value={v.driverId ?? ""}
-                    disabled={busy !== null}
-                    onChange={(e) => run(`driver-${v.id}`, async () => { await api(`/api/admin/vehicles/${v.id}`, { method: "PATCH", body: { driverId: e.target.value || null } }); })}
-                  >
-                    <option value="">Unassigned</option>
-                    {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                  </Select>
-                </td>
-                <td className="px-5 py-3 text-right">
-                  <Button
-                    size="sm" variant="ghost" className="text-red-600 hover:bg-red-50"
-                    loading={busy === `delete-${v.id}`} disabled={busy !== null}
-                    onClick={() => { if (confirm(`Delete ${v.registration}?`)) run(`delete-${v.id}`, async () => { await api(`/api/admin/vehicles/${v.id}`, { method: "DELETE" }); }); }}
-                  >
-                    Delete
-                  </Button>
-                </td>
-              </tr>
+            {vehicles.length === 0 && <tr><td colSpan={8} className="px-5 py-10 text-center text-slate-500">No vehicles yet.</td></tr>}
+            {vehicles.map((row) => (
+              <VehicleTableRows
+                key={row.vehicle.id}
+                row={row}
+                vehicleTypes={vehicleTypes}
+                drivers={drivers}
+                editing={editing === row.vehicle.id}
+                onEdit={() => { setEditing(editing === row.vehicle.id ? null : row.vehicle.id); setAdding(false); }}
+                onDone={() => setEditing(null)}
+                busy={busy}
+                fields={fields}
+                run={run}
+              />
             ))}
           </tbody>
         </table>
       </div>
     </Card>
+  );
+}
+
+function VehicleTableRows({ row, vehicleTypes, drivers, editing, onEdit, onDone, busy, fields, run }: {
+  row: VehicleRow;
+  vehicleTypes: VehicleType[];
+  drivers: Driver[];
+  editing: boolean;
+  onEdit: () => void;
+  onDone: () => void;
+  busy: string | null;
+  fields: Record<string, string>;
+  run: (key: string, fn: () => Promise<void>) => Promise<boolean>;
+}) {
+  const { vehicle, typeName, typeMaxWeightKg } = row;
+  return (
+    <>
+      <tr className={editing ? "bg-orange-50/40" : undefined}>
+        <td className="px-5 py-3 font-semibold text-slate-900">{vehicle.registration}</td>
+        <td className="px-5 py-3 text-slate-700">{typeName}</td>
+        <td className="px-5 py-3 text-slate-700">{[vehicle.make, vehicle.model, vehicle.year].filter(Boolean).join(" ") || "—"}</td>
+        <td className="px-5 py-3 text-slate-700">
+          {Math.min(vehicle.capacityKg ?? typeMaxWeightKg, typeMaxWeightKg).toLocaleString()} kg
+          {vehicle.capacityKg == null && <span className="ml-1 text-xs text-slate-400">class cap</span>}
+        </td>
+        <td className="px-5 py-3">
+          <VehicleLocationCell
+            key={`${vehicle.id}:${vehicle.currentLocation ?? ""}`}
+            value={vehicle.currentLocation}
+            busy={busy !== null}
+            onSave={async (currentLocation) => {
+              await run(`location-${vehicle.id}`, async () => {
+                await api(`/api/admin/vehicles/${vehicle.id}`, { method: "PATCH", body: { currentLocation } });
+              });
+            }}
+          />
+        </td>
+        <td className="px-5 py-3">
+          <div className="flex items-center gap-2">
+            <VehicleStatusBadge status={vehicle.status} />
+            <Select
+              className="w-36 py-1 text-xs"
+              value={vehicle.status}
+              disabled={busy !== null}
+              onChange={(event) => run(`status-${vehicle.id}`, async () => {
+                await api(`/api/admin/vehicles/${vehicle.id}`, { method: "PATCH", body: { status: event.target.value } });
+              })}
+            >
+              {VEHICLE_STATUSES.map((status) => <option key={status} value={status} disabled={status === "in_use"}>{status.replace("_", " ")}</option>)}
+            </Select>
+          </div>
+        </td>
+        <td className="px-5 py-3">
+          <Select
+            className="w-44 py-1 text-xs"
+            value={vehicle.driverId ?? ""}
+            disabled={busy !== null || vehicle.status === "in_use"}
+            onChange={(event) => run(`driver-${vehicle.id}`, async () => {
+              await api(`/api/admin/vehicles/${vehicle.id}`, { method: "PATCH", body: { driverId: event.target.value || null } });
+            })}
+          >
+            <option value="">Unassigned</option>
+            {drivers.filter((driver) =>
+              (driver.status === "active" && (driver.vehicleId == null || driver.vehicleId === vehicle.id)) || driver.id === vehicle.driverId,
+            ).map((driver) => <option key={driver.id} value={driver.id}>{driver.name}</option>)}
+          </Select>
+        </td>
+        <td className="px-5 py-3 text-right">
+          <div className="flex justify-end gap-1">
+            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={onEdit}>{editing ? "Close" : "Edit"}</Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-red-600 hover:bg-red-50"
+              loading={busy === `delete-${vehicle.id}`}
+              disabled={busy !== null}
+              onClick={() => {
+                if (confirm(`Delete ${vehicle.registration}?`)) {
+                  run(`delete-${vehicle.id}`, async () => {
+                    await api(`/api/admin/vehicles/${vehicle.id}`, { method: "DELETE" });
+                  });
+                }
+              }}
+            >
+              Delete
+            </Button>
+          </div>
+        </td>
+      </tr>
+      {editing && (
+        <tr>
+          <td colSpan={8} className="p-0">
+            <VehicleEditForm
+              vehicle={vehicle}
+              vehicleTypes={vehicleTypes}
+              drivers={drivers}
+              busy={busy}
+              fields={fields}
+              onCancel={onDone}
+              onSave={async (body) => {
+                const ok = await run(`edit-${vehicle.id}`, async () => {
+                  await api(`/api/admin/vehicles/${vehicle.id}`, { method: "PATCH", body });
+                });
+                if (ok) onDone();
+              }}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function VehicleEditForm({ vehicle, vehicleTypes, drivers, busy, fields, onCancel, onSave }: {
+  vehicle: VehicleRow["vehicle"];
+  vehicleTypes: VehicleType[];
+  drivers: Driver[];
+  busy: string | null;
+  fields: Record<string, string>;
+  onCancel: () => void;
+  onSave: (body: Record<string, unknown>) => Promise<void>;
+}) {
+  return (
+    <form
+      className="grid gap-4 bg-slate-50/70 p-5 sm:grid-cols-2 lg:grid-cols-4"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        const form = values(event);
+        await onSave({
+          registration: form.registration,
+          vehicleTypeId: form.vehicleTypeId,
+          make: form.make || null,
+          model: form.model || null,
+          year: form.year || null,
+          capacityKg: form.capacityKg || null,
+          ...(form.status ? { status: form.status } : {}),
+          currentLocation: form.currentLocation || null,
+          ...(vehicle.status === "in_use" ? {} : { driverId: form.driverId || null }),
+          notes: form.notes || null,
+        });
+      }}
+    >
+      <Field label="Registration" error={fields.registration} required><Input name="registration" defaultValue={vehicle.registration} required /></Field>
+      <Field label="Vehicle class" error={fields.vehicleTypeId} required>
+        <Select name="vehicleTypeId" defaultValue={vehicle.vehicleTypeId} required>
+          {vehicleTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}
+        </Select>
+      </Field>
+      <Field label="Make" error={fields.make}><Input name="make" defaultValue={vehicle.make ?? ""} /></Field>
+      <Field label="Model" error={fields.model}><Input name="model" defaultValue={vehicle.model ?? ""} /></Field>
+      <Field label="Year" error={fields.year}><Input name="year" type="number" min={1980} max={2100} defaultValue={vehicle.year ?? ""} /></Field>
+      <Field label="Capacity (kg)" error={fields.capacityKg} hint="Leave blank to use the class limit.">
+        <Input name="capacityKg" type="number" min={1} max={100_000} defaultValue={vehicle.capacityKg ?? ""} />
+      </Field>
+      <Field label="Status" error={fields.status}>
+        {vehicle.status === "in_use" ? (
+          <p className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">In use — managed by the active assignment</p>
+        ) : (
+          <Select name="status" defaultValue={vehicle.status}>
+            {MANUAL_VEHICLE_STATUSES.map((status) => <option key={status} value={status}>{status.replace("_", " ")}</option>)}
+          </Select>
+        )}
+      </Field>
+      <Field label="Assigned driver" error={fields.driverId}>
+        <Select name="driverId" defaultValue={vehicle.driverId ?? ""} disabled={busy !== null || vehicle.status === "in_use"}>
+          <option value="">Unassigned</option>
+          {drivers.filter((driver) =>
+            (driver.status === "active" && (driver.vehicleId == null || driver.vehicleId === vehicle.id)) || driver.id === vehicle.driverId,
+          ).map((driver) => <option key={driver.id} value={driver.id}>{driver.name}</option>)}
+        </Select>
+      </Field>
+      <Field label="Current location" error={fields.currentLocation}><Input name="currentLocation" defaultValue={vehicle.currentLocation ?? ""} /></Field>
+      <Field label="Notes" error={fields.notes} className="sm:col-span-2 lg:col-span-2"><Input name="notes" defaultValue={vehicle.notes ?? ""} /></Field>
+      <div className="flex items-end gap-2">
+        <Button type="submit" loading={busy === `edit-${vehicle.id}`}>Save changes</Button>
+        <Button type="button" variant="ghost" onClick={onCancel}>Cancel</Button>
+      </div>
+    </form>
   );
 }
 
@@ -275,53 +455,203 @@ function VehicleTypeRows({ t, editing, onEdit, onDone, run, fields, busy }: {
 // Drivers
 // ---------------------------------------------------------------------------
 
-export function DriversManager({ drivers }: { drivers: { id: number; name: string; email: string; phone: string | null; status: string; vehicleRegistration: string | null; activeJobs: number; createdAt: string | Date }[] }) {
+type ManagedDriver = {
+  id: number;
+  name: string;
+  email: string;
+  phone: string | null;
+  status: string;
+  availability: "available" | "off_duty";
+  licenseNumber: string | null;
+  licenseClass: string | null;
+  licenseExpiryDate: string | null;
+  driverNotes: string | null;
+  vehicleId: number | null;
+  vehicleRegistration: string | null;
+  activeJobs: number;
+  dispatchStatus: "available" | "off_duty" | "busy" | "suspended";
+  currentJob: { id: number; reference: string; status: string; scheduledAt: Date | string; pickupAddress: string; dropoffAddress: string } | null;
+  createdAt: Date | string;
+};
+
+function DriverProfileForm({
+  driver,
+  busy,
+  fields,
+  onCancel,
+  onSave,
+}: {
+  driver: ManagedDriver;
+  busy: string | null;
+  fields: Record<string, string>;
+  onCancel: () => void;
+  onSave: (body: Record<string, unknown>) => Promise<void>;
+}) {
+  return (
+    <form
+      className="grid gap-4 bg-slate-50/70 p-5 sm:grid-cols-2 lg:grid-cols-4"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        await onSave(values(event));
+      }}
+    >
+      <Field label="Full name" error={fields.name} required><Input name="name" defaultValue={driver.name} required /></Field>
+      <Field label="Email" error={fields.email} required><Input name="email" type="email" defaultValue={driver.email} required /></Field>
+      <Field label="Mobile" error={fields.phone}><Input name="phone" defaultValue={driver.phone ?? ""} /></Field>
+      <Field label="Account" error={fields.status}>
+        <Select name="status" defaultValue={driver.status}>
+          <option value="active">Active</option><option value="suspended">Suspended</option>
+        </Select>
+      </Field>
+      <Field label="Availability" error={fields.availability}>
+        <Select name="availability" defaultValue={driver.availability}>
+          <option value="available">On duty</option><option value="off_duty">Off duty</option>
+        </Select>
+      </Field>
+      <Field label="Licence number" error={fields.licenseNumber}><Input name="licenseNumber" defaultValue={driver.licenseNumber ?? ""} /></Field>
+      <Field label="Licence class" error={fields.licenseClass}><Input name="licenseClass" defaultValue={driver.licenseClass ?? ""} placeholder="e.g. HR" /></Field>
+      <Field label="Licence expiry" error={fields.licenseExpiryDate}><Input name="licenseExpiryDate" type="date" defaultValue={driver.licenseExpiryDate ?? ""} /></Field>
+      <Field label="Profile notes" error={fields.notes} className="sm:col-span-2 lg:col-span-3"><Textarea name="notes" defaultValue={driver.driverNotes ?? ""} placeholder="Induction, endorsements, preferred shifts…" /></Field>
+      <div className="flex items-end gap-2">
+        <Button type="submit" loading={busy === `driver-${driver.id}`}>Save profile</Button>
+        <Button type="button" variant="ghost" onClick={onCancel}>Close</Button>
+      </div>
+    </form>
+  );
+}
+
+function DriverAvailabilityBadge({ driver }: { driver: ManagedDriver }) {
+  if (driver.dispatchStatus === "busy") return <Badge tone="blue">Assigned</Badge>;
+  if (driver.dispatchStatus === "suspended") return <Badge tone="red">Suspended</Badge>;
+  if (driver.dispatchStatus === "off_duty") return <Badge tone="slate">Off duty</Badge>;
+  return <Badge tone="green">Available</Badge>;
+}
+
+export function DriversManager({ drivers }: { drivers: ManagedDriver[] }) {
   const { busy, error, fields, run } = useAction();
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null);
   return (
     <Card>
       <CardHeader
         title="Drivers"
-        description="Driver accounts can be allocated to jobs. Driver execution tools are planned for a future phase."
-        action={<Button size="sm" variant={adding ? "secondary" : "primary"} onClick={() => setAdding((a) => !a)}>{adding ? "Close" : "+ Add driver"}</Button>}
+        description="Manage driver accounts, licences, on-duty availability, linked trucks and current assignments."
+        action={<Button size="sm" variant={adding ? "secondary" : "primary"} onClick={() => { setAdding((a) => !a); setEditing(null); }}>{adding ? "Close" : "+ Add driver"}</Button>}
       />
       {error && <div className="px-5 pt-4"><Alert tone="error">{error}</Alert></div>}
       {adding && (
         <form
-          className="grid gap-4 border-b border-slate-100 bg-slate-50/60 p-5 sm:grid-cols-2 lg:grid-cols-5"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            const form = e.currentTarget;
-            const ok = await run("create-driver", async () => { await api("/api/admin/drivers", { method: "POST", body: values(e) }); });
+          className="grid gap-4 border-b border-slate-100 bg-slate-50/60 p-5 sm:grid-cols-2 lg:grid-cols-4"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const ok = await run("create-driver", async () => { await api("/api/admin/drivers", { method: "POST", body: values(event) }); });
             if (ok) { form.reset(); setAdding(false); }
           }}
         >
           <Field label="Full name" error={fields.name} required><Input name="name" required /></Field>
           <Field label="Email" error={fields.email} required><Input name="email" type="email" required /></Field>
           <Field label="Mobile" error={fields.phone}><Input name="phone" /></Field>
-          <Field label="Temporary password" error={fields.password} required><Input name="password" type="text" minLength={8} required placeholder="min 8 characters" /></Field>
-          <div className="flex items-end"><Button type="submit" loading={busy === "create-driver"} className="w-full">Create driver</Button></div>
+          <Field label="Temporary password" error={fields.password} required><Input name="password" type="password" minLength={8} required placeholder="At least 8 characters" /></Field>
+          <Field label="Licence number" error={fields.licenseNumber}><Input name="licenseNumber" /></Field>
+          <Field label="Licence class" error={fields.licenseClass}><Input name="licenseClass" placeholder="e.g. HR" /></Field>
+          <Field label="Licence expiry" error={fields.licenseExpiryDate}><Input name="licenseExpiryDate" type="date" /></Field>
+          <Field label="Availability" error={fields.availability}>
+            <Select name="availability" defaultValue="available"><option value="available">On duty</option><option value="off_duty">Off duty</option></Select>
+          </Field>
+          <Field label="Profile notes" error={fields.notes} className="sm:col-span-2 lg:col-span-3"><Textarea name="notes" placeholder="Induction, endorsements, preferred shifts…" /></Field>
+          <div className="flex items-end"><Button type="submit" loading={busy === "create-driver"} className="w-full">Create driver account</Button></div>
         </form>
       )}
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-slate-100 text-sm">
           <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">
-            <tr><th className="px-5 py-3">Driver</th><th className="px-5 py-3">Contact</th><th className="px-5 py-3">Vehicle</th><th className="px-5 py-3">Active jobs</th><th className="px-5 py-3">Status</th></tr>
+            <tr>
+              <th className="px-5 py-3">Driver / contact</th><th className="px-5 py-3">Licence</th><th className="px-5 py-3">Availability</th>
+              <th className="px-5 py-3">Assigned vehicle</th><th className="px-5 py-3">Current job</th><th className="px-5 py-3" />
+            </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {drivers.length === 0 && <tr><td colSpan={5} className="px-5 py-10 text-center text-slate-500">No drivers yet.</td></tr>}
-            {drivers.map((d) => (
-              <tr key={d.id}>
-                <td className="px-5 py-3 font-semibold text-slate-900">{d.name}</td>
-                <td className="px-5 py-3 text-slate-700">{d.email}{d.phone && <div className="text-xs text-slate-500">{d.phone}</div>}</td>
-                <td className="px-5 py-3 text-slate-700">{d.vehicleRegistration ?? <span className="text-slate-400">No vehicle linked</span>}</td>
-                <td className="px-5 py-3 text-slate-700">{d.activeJobs}</td>
-                <td className="px-5 py-3">{d.status === "active" ? <Badge tone="green">Active</Badge> : <Badge tone="red">Suspended</Badge>}</td>
-              </tr>
+            {drivers.length === 0 && <tr><td colSpan={6} className="px-5 py-10 text-center text-slate-500">No drivers yet.</td></tr>}
+            {drivers.map((driver) => (
+              <DriverTableRow
+                key={driver.id}
+                driver={driver}
+                editing={editing === driver.id}
+                onEdit={() => { setEditing(editing === driver.id ? null : driver.id); setAdding(false); }}
+                onCancel={() => setEditing(null)}
+                busy={busy}
+                fields={fields}
+                run={run}
+              />
             ))}
           </tbody>
         </table>
       </div>
     </Card>
+  );
+}
+
+function DriverTableRow({
+  driver,
+  editing,
+  onEdit,
+  onCancel,
+  busy,
+  fields,
+  run,
+}: {
+  driver: ManagedDriver;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  busy: string | null;
+  fields: Record<string, string>;
+  run: (key: string, fn: () => Promise<void>) => Promise<boolean>;
+}) {
+  return (
+    <>
+      <tr className={editing ? "bg-orange-50/40" : undefined}>
+        <td className="px-5 py-3">
+          <div className="font-semibold text-slate-900">{driver.name}</div>
+          <div className="text-xs text-slate-600">{driver.email}{driver.phone ? ` · ${driver.phone}` : ""}</div>
+          <div className="mt-1 text-xs text-slate-400">Account {driver.status}</div>
+        </td>
+        <td className="px-5 py-3 text-slate-700">
+          {driver.licenseClass || driver.licenseNumber ? <>{driver.licenseClass ?? "Licence"}{driver.licenseNumber ? ` · ${driver.licenseNumber}` : ""}</> : <span className="text-slate-400">Not recorded</span>}
+          {driver.licenseExpiryDate && <div className="text-xs text-slate-500">Expires {driver.licenseExpiryDate}</div>}
+        </td>
+        <td className="px-5 py-3"><DriverAvailabilityBadge driver={driver} /></td>
+        <td className="px-5 py-3 text-slate-700">{driver.vehicleRegistration ?? <span className="text-slate-400">No vehicle linked</span>}</td>
+        <td className="px-5 py-3">
+          {driver.currentJob ? (
+            <Link className="font-medium text-orange-700 hover:underline" href={`/admin/bookings/${driver.currentJob.id}`}>
+              {driver.currentJob.reference} · {driver.currentJob.status.replaceAll("_", " ")}
+              {driver.activeJobs > 1 && <span className="ml-1 text-xs text-red-600">(+{driver.activeJobs - 1} more)</span>}
+              <span className="block text-xs font-normal text-slate-500">{formatDateTime(driver.currentJob.scheduledAt)}</span>
+            </Link>
+          ) : <span className="text-slate-400">No active job</span>}
+        </td>
+        <td className="px-5 py-3 text-right"><Button size="sm" variant="secondary" onClick={onEdit}>{editing ? "Close" : "Edit profile"}</Button></td>
+      </tr>
+      {editing && (
+        <tr>
+          <td colSpan={6} className="p-0">
+            <DriverProfileForm
+              driver={driver}
+              busy={busy}
+              fields={fields}
+              onCancel={onCancel}
+              onSave={async (body) => {
+                const ok = await run(`driver-${driver.id}`, async () => {
+                  await api(`/api/admin/drivers/${driver.id}`, { method: "PATCH", body });
+                });
+                if (ok) onCancel();
+              }}
+            />
+          </td>
+        </tr>
+      )}
+    </>
   );
 }

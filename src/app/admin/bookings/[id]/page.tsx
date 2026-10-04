@@ -18,8 +18,12 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
   const { id } = await params;
   const bookingId = Number(id);
   if (!Number.isInteger(bookingId)) notFound();
-  const [detail, drivers, vehicles] = await Promise.all([getBookingDetail(bookingId), listDrivers(), listAssignableVehicles()]);
+  const detail = await getBookingDetail(bookingId);
   if (!detail) notFound();
+  const [drivers, vehicles] = await Promise.all([
+    listDrivers(),
+    listAssignableVehicles({ includeVehicleId: detail.booking.vehicleId ?? undefined }),
+  ]);
   const { booking: b } = detail;
   const directionsUrl = new URL("https://www.google.com/maps/dir/");
   directionsUrl.searchParams.set("api", "1");
@@ -105,8 +109,8 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
 
         <div>
           <BookingManager
-            booking={{ id: b.id, status: b.status, driverId: b.driverId, vehicleId: b.vehicleId, vehicleTypeId: b.vehicleTypeId, quotedPriceCents: b.quotedPriceCents, finalPriceCents: b.finalPriceCents, adminNotes: b.adminNotes }}
-            drivers={drivers.map((d) => ({ id: d.id, name: d.name, vehicleId: d.vehicleId, vehicleRegistration: d.vehicleRegistration, activeJobs: d.activeJobs, status: d.status }))}
+            booking={{ id: b.id, status: b.status, driverId: b.driverId, vehicleId: b.vehicleId, vehicleTypeId: b.vehicleTypeId, weightKg: b.weightKg, pallets: b.pallets, quotedPriceCents: b.quotedPriceCents, finalPriceCents: b.finalPriceCents, adminNotes: b.adminNotes }}
+            drivers={drivers.map((d) => ({ id: d.id, name: d.name, vehicleId: d.vehicleId, vehicleRegistration: d.vehicleRegistration, activeJobs: d.activeJobs, status: d.status, availability: d.availability, dispatchStatus: d.dispatchStatus, currentJob: d.currentJob }))}
             vehicles={vehicles}
           />
         </div>

@@ -1,4 +1,4 @@
-# Loadline — Feature Specification (Phases 0–2)
+# Loadline — Feature Specification (Phases 0–3)
 
 ## 1. Personas
 
@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | **Customer** | Businesses (warehouses, retailers, builders) and individuals needing a truck now or at a scheduled time | Book the right truck quickly, know the price up front, see what is happening with the job. |
 | **Admin / Dispatcher** | Loadline operations staff | Keep every job moving: confirm, price, assign the right driver + vehicle, resolve problems, manage the fleet and customers. |
-| **Driver** (future phase) | Owner-drivers and fleet drivers | See assigned jobs, execute them step by step, capture proof of delivery. |
+| **Driver** | Owner-drivers and fleet drivers | Manage on-duty availability, see current assignments and progress each job through delivery. |
 
 ---
 
@@ -31,19 +31,23 @@
 
 1. **Login** — staff accounts are seeded/created by an admin; staff land on `/admin`.
 2. **Dashboard** — jobs needing dispatch (pending), active jobs, jobs scheduled today, revenue this month, customers, available vehicles, status breakdown, latest bookings.
-3. **Booking management**
-   * List with filters (status, search) and pagination.
-   * Detail page shows everything the customer sees plus customer contact details and internal notes.
-   * Actions: **Confirm**, **Assign** driver + vehicle, progress through `en_route_pickup → picked_up → in_transit → delivered → completed`, **Cancel**/**Fail** with reason, **Unassign**, set **final price**, edit **admin notes**. Every action is written to the timeline.
+3. **Dispatch & booking management**
+   * `/admin/dispatch` lists jobs still needing a driver/truck and shows the live available-driver and available-vehicle roster.
+   * Dispatch assigns a driver and a truck of the booked class whose capacity supports the load; it confirms pending jobs and reserves both resources atomically.
+   * Booking list filters by status/search; detail shows customer and route information, timeline and current assignment.
+   * Actions: **Confirm**, **Assign / Reassign**, **Cancel assignment** (release driver + vehicle), progress/cancel/fail jobs, set **final price**, edit **admin notes**. Every action is written to the timeline.
 4. **Customer management** — searchable list with booking counts and lifetime spend, detail page with booking history, **suspend / reactivate** account.
-5. **Fleet management**
+5. **Fleet & driver management**
    * **Vehicle types**: create/edit classes, capacities, base fare, per-km rate, minimum charge, active flag.
-   * **Vehicles**: create/edit/delete units, status (available / in use / maintenance / inactive), link to a driver.
-   * **Drivers**: create driver accounts, see linked vehicle.
+   * **Vehicles**: create/edit/delete units, capacity, status (available / in use / maintenance / inactive), current last-known location, link to a single driver.
+   * **Drivers**: create accounts and profiles with licence details, on-duty/off-duty availability, assigned vehicle and current job.
+   * Busy/suspended/off-duty drivers and allocated trucks cannot be selected for a new dispatch.
 
-## 4. Driver journey (future phase — not built)
+## 4. Driver journey (Phase 3 — implemented)
 
-Login → "My jobs" (assigned, ordered by pickup time) → job detail with addresses/contacts → buttons: *On my way*, *Picked up*, *Delivered* (photo + signature POD) → job history. The schema (driver role, `driver_id` on bookings, `vehicles.driver_id`, event log, lat/lng) supports this without changing the booking workflow.
+Login → `/driver` → toggle on/off duty → see active assignments ordered by pickup time → review the route, stops, customer contacts, load and assigned truck → progress *Assigned → En route to pickup → Picked up → In transit → Delivered*. A driver can report a failed job with a required reason. Dispatch completes delivered jobs or reopens failed jobs for re-dispatch. Driver actions are restricted to bookings assigned to that driver and every transition is added to the audit timeline.
+
+Live GPS, proof-of-delivery photos/signatures, push/email notifications, ratings and driver payment remain future work.
 
 ---
 
@@ -134,3 +138,44 @@ Login → "My jobs" (assigned, ordered by pickup time) → job detail with addre
 ### Maps provider
 
 Autocomplete and geocoding use Photon; driving routes use OSRM; the embedded route preview uses OpenStreetMap tiles and includes attribution. Google Maps directions are also available as an external link. The public demo endpoints require no API key but have no production SLA; a production deployment should use a contracted or self-hosted provider.
+
+---
+
+## 8. Phase 3 — Vehicles & Dispatch (implemented)
+
+### Fleet
+- [x] Manage vehicle types and rated capacity; each physical vehicle can set a lower payload capacity than its class maximum.
+- [x] Track vehicle status (`available`, `in_use`, `maintenance`, `inactive`), one assigned driver, and a dispatcher-maintained last-known location.
+- [x] Prevent dispatch of an in-use, maintenance or inactive truck. While a truck serves an active job, block availability/class changes, capacity reductions below that load, and deletion; changing its linked driver is blocked while it is in use. Non-disruptive details and last-known location remain editable.
+
+### Drivers
+- [x] Create driver login accounts and operating profiles with licence number/class/expiry and notes.
+- [x] Manage account status separately from on-duty/off-duty availability.
+- [x] Show the linked truck, current active job and operational availability on the Drivers page and dispatch board.
+- [x] Drivers can toggle availability when they have no open assignment.
+
+### Dispatch & lifecycle
+- [x] `/admin/dispatch` shows pending/confirmed jobs without a complete assignment and `assigned` jobs missing a driver or truck, so incomplete assignments can be repaired; the current driver/truck is retained as a choice when still valid.
+- [x] Require an active on-duty driver and a compatible available vehicle for new allocations; repairing an incomplete `assigned` job can keep its existing allocated resource.
+- [x] Lock resource rows during dispatch to prevent two simultaneous assignments to the same driver or truck.
+- [x] Reassign from a job detail; cancel an assignment to return the job to confirmed and free its resources.
+- [x] Drivers can only read/progress their own assigned jobs; they can report failure only with a reason.
+- [x] Record assignment, reassignment, unassignment and status progress in the booking timeline.
+
+Standard lifecycle:
+
+```text
+pending → confirmed (or dispatch assigns directly) → assigned → en_route_pickup → picked_up → in_transit → delivered → completed
+   └───────────┴───────────┴────────────────────┴────────→ cancelled (dispatch; customers cancel only before en route)
+assigned → confirmed (cancel assignment; release driver and vehicle)
+en_route_pickup / in_transit → failed → confirmed (dispatch reopens for re-dispatch)
+```
+
+### Phase 3 acceptance checks
+
+1. Create a vehicle and driver profile; set the driver on duty and link one truck.
+2. A pending booking appears on `/admin/dispatch`; assigning an unavailable driver, wrong class or undersized truck is rejected.
+3. Assign a compatible driver/truck. The booking becomes `assigned`; both resources disappear from the available roster and the timeline records the assignment.
+4. Reassign the job or cancel its assignment. The old resources become available and the timeline records the change.
+5. Log in as the driver and progress the assigned job through pickup and delivery. Another driver cannot view or update that job.
+6. Mark a delivered job completed from dispatch; the driver and vehicle become available. A failed job can be reopened and re-dispatched.

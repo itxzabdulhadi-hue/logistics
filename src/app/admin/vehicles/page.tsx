@@ -15,7 +15,7 @@ export default async function AdminVehiclesPage() {
     <>
       <PageHeader title="Fleet" description="Manage physical vehicles and the vehicle classes customers can book." />
       <div className="space-y-6">
-        <VehiclesManager vehicles={vehicles} vehicleTypes={vehicleTypes} drivers={drivers.map((d) => ({ id: d.id, name: d.name }))} />
+        <VehiclesManager vehicles={vehicles} vehicleTypes={vehicleTypes} drivers={drivers.map((d) => ({ id: d.id, name: d.name, vehicleId: d.vehicleId, status: d.status }))} />
         <VehicleTypesManager vehicleTypes={vehicleTypes} />
       </div>
     </>

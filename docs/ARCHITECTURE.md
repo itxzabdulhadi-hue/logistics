@@ -1,4 +1,4 @@
-# Loadline — Architecture (Phases 0–2)
+# Loadline — Architecture (Phases 0–3)
 
 Loadline is an Instatruck-style on-demand truck booking SaaS: customers book a truck for a pickup → delivery job, dispatchers confirm/price/assign the job to a driver + vehicle, and drivers execute it. This document captures the Phase 0 decisions: how Instatruck works, the journeys we are modelling, the MVP cut, the stack, the system architecture, the database design, and the REST API surface.
 
@@ -23,8 +23,8 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 ## 2. Journeys (summary — full detail in `FEATURE_SPEC.md`)
 
 * **Customer**: register → log in → dashboard → route (pickup → stops → drop-off) → vehicle/load → itemized quote → confirmation → booking → track/cancel/manage profile.
-* **Admin / Dispatcher**: log in → dashboard (what needs attention) → review pending jobs → confirm → assign driver + vehicle → progress statuses → adjust final price / notes → complete or cancel → manage customers (view, suspend) and fleet (vehicle types & rates, vehicles, drivers).
-* **Driver** (future phase): log in → see assigned jobs → progress job (en route → picked up → delivered) → capture POD.
+* **Admin / Dispatcher**: log in → dashboard → dispatch board (unassigned jobs + available people/fleet) → confirm/assign/reassign → review status progress → adjust final price/notes → complete or cancel → manage customers, driver profiles and fleet.
+* **Driver**: log in → set on/off duty → see assigned jobs → review route/load/contacts → progress status through pickup and delivery → report exceptions.
 
 ---
 
@@ -44,7 +44,13 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 * Admin-configurable service fees, surcharge and GST, in addition to per-vehicle tariffs.
 * Server-side route and price recalculation on booking creation; store route distance, duration and ordered stop locations.
 
-**Deliberately deferred:** driver mobile UI, live GPS tracking, card payments (Stripe), invoices/PDF, email delivery, ratings, notifications and marketplace auto-dispatch. The schema still carries hooks for these (driver role, vehicle↔driver link, location fields, event log).
+**Phase 3 — vehicles & dispatch:**
+
+* Manage physical truck capacity, operating status, assigned driver and last-known location; manage driver profiles, licences and on/off-duty availability.
+* Central dispatch board for jobs missing a driver or compatible truck (including incomplete `assigned` records), available drivers and compatible fleet; atomically assign/reassign or release both resources.
+* Driver workspace for assigned routes and authorized status progression; retain the booking event log as the operational audit trail.
+
+**Deliberately deferred:** live GPS tracking, proof-of-delivery photos/signatures, card payments (Stripe), invoices/PDF, email/push notifications, ratings and marketplace auto-dispatch. Vehicle location is a dispatcher-maintained last-known label, not live telemetry.
 
 ---
 
@@ -76,11 +82,11 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 │                                                                      │
 │  Route groups           API route handlers (src/app/api/**)          │
 │  ├ (auth)   login …     ├ /api/auth/*         register/login/reset   │
-│  ├ (customer) dashboard ├ /api/bookings/*     create/list/get/patch  │
-│  │    bookings, profile ├ /api/quote          price estimate         │
-│  └ admin/*  dashboard,  ├ /api/profile        self-service           │
-│       bookings,         ├ /api/vehicle-types  public catalogue       │
-│       customers, fleet  └ /api/admin/*        stats, customers, fleet│
+│  ├ (customer) bookings  ├ /api/bookings/*     create/list/get/patch  │
+│  │    dashboard/profile├ /api/quote          price estimate         │
+│  ├ admin/* dispatch …   ├ /api/driver/*       self-service availability│
+│  ├ driver/* my jobs    ├ /api/vehicle-types  public catalogue       │
+│  └ profile             └ /api/admin/*        stats, customers, fleet│
 │                                                                      │
 │  src/lib        auth (jwt, cookies, permissions), api (errors,       │
 │                 handler wrapper), validation (zod), booking-rules    │
@@ -99,8 +105,8 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 Design rules:
 
 * **Pages read through services, never raw SQL in components.** The same service functions back the REST API, so UI and API can never drift.
-* **All mutations go through the REST API** (`/api/**`) so the surface is reusable by a future driver app / mobile client.
-* **Authorization is enforced server-side twice:** the layout for each route group redirects unauthenticated / wrong-role users, and every API handler calls `requireApiUser(permission)`.
+* **All mutations go through the REST API** (`/api/**`) so the surface is reusable by future mobile clients; driver status actions additionally verify the job is currently assigned to that driver.
+* **Authorization is enforced server-side twice:** the layout for each route group redirects unauthenticated / wrong-role users, and every API handler calls `requireApiUser(permission)`. Resource availability and status edges are enforced in service transactions.
 * **Prices and routes are always recomputed server-side** from the entered addresses, current vehicle tariff and current admin rules; client distance/coordinates are never accepted as the booking price source.
 * **Every status change writes a `booking_events` row** (who, from → to, note, when); the booking row itself caches the current status and milestone timestamps for cheap querying.
 
@@ -115,7 +121,8 @@ users 1──∞ bookings ∞──1 vehicle_types
   │            │ ∞──0..1 vehicles ∞──1 vehicle_types
   │            │ ∞──0..1 users (driver)
   │            └─1──∞ booking_events ∞──0..1 users (actor)
-  ├─0..1 vehicles (driver ↔ vehicle)
+  ├─0..1 driver_profiles
+  ├─0..1 vehicles (one usual vehicle per driver)
   └─1──∞ password_reset_tokens
 ```
 
@@ -133,6 +140,8 @@ users 1──∞ bookings ∞──1 vehicle_types
 | status | enum `user_status` (`active`, `suspended`) | suspended users cannot log in |
 | last_login_at, created_at, updated_at | timestamp | |
 
+**driver_profiles** — one optional operating profile per driver account: `driver_id`, `availability` (`available` / `off_duty`), licence number/class/expiry, notes and timestamps. Busy state and current job are derived from open assigned bookings; account suspension remains on `users.status`.
+
 **password_reset_tokens** — hashed one-time tokens, 1 h expiry, `used_at` set on consumption.
 
 **vehicle_types** — the bookable classes and their tariff.
@@ -146,7 +155,7 @@ users 1──∞ bookings ∞──1 vehicle_types
 
 **pricing_rules** — singleton, admin-managed rates used for every new quote: `additional_stop_fee_cents`, `tailgate_fee_cents`, `hand_unload_fee_cents`, `asap_surcharge_basis_points`, `gst_rate_basis_points`, `updated_at`.
 
-**vehicles** — physical fleet units (`registration` unique), linked to a `vehicle_type` and optionally a `driver` (user). `status`: `available`, `in_use`, `maintenance`, `inactive`.
+**vehicles** — physical fleet units (`registration` unique), linked to a `vehicle_type` and optionally one usual `driver` (user). `capacity_kg` may cap the class payload; `current_location` is a dispatcher-maintained last-known label. `status`: `available`, `in_use` (reserved/assigned by dispatch), `maintenance`, `inactive`. Assignment reserves a compatible truck; completion, cancellation, failure or unassignment releases it.
 
 **bookings** — the job. Key groups of columns:
 
@@ -190,7 +199,7 @@ All money is stored as **integer cents** to avoid floating point drift; distance
             │ picked_up  │ ───▶ │ in_transit │
             └─────┬──────┘      └─────┬──────┘
                   └──────────┬────────┘
-                             ▼ POD captured
+                             ▼ driver reports delivery
                        ┌────────────┐
                        │ delivered  │
                        └─────┬──────┘
@@ -205,7 +214,8 @@ All money is stored as **integer cents** to avoid floating point drift; distance
 
 * Customers may cancel only while the job is `pending`, `confirmed`, or `assigned`.
 * Dispatchers can move through any legal edge; the transition table lives in `src/lib/booking-rules.ts` and is enforced in the service layer.
-* `assigned` requires a driver on the booking.
+* `assigned` requires a driver and a compatible vehicle on the booking. Only the dispatch assignment action can create this state; it locks both resources and checks load capacity.
+* Driver transitions are limited to their own assigned jobs; delivered jobs remain reserved until dispatch completes them. Assignment cancellation returns the booking to `confirmed` and releases resources.
 
 ---
 
@@ -225,17 +235,18 @@ Conventions: JSON in/out, cookie-based auth, `{ error: { code, message, details?
 | `GET /api/places/autocomplete?q=…` | public | debounced Australia-scoped address suggestions |
 | `POST /api/route` | public | geocode ordered addresses and return OSRM driving route, distance, duration and geometry |
 | `POST /api/quote` | public | itemized quote from server-routed distance and current rates |
-| `GET /api/bookings` | customer / staff | own bookings (customer) or all (staff); `status`, `q`, `page` filters |
+| `GET /api/bookings` | customer / driver / staff | own bookings (customer), assigned jobs (driver) or all (staff); `status`, `q`, `page` filters |
 | `POST /api/bookings` | customer | create booking (server recomputes price) |
 | `GET /api/bookings/:id` | owner / staff | booking detail + timeline |
-| `PATCH /api/bookings/:id` | owner / staff | `{action:"cancel"}` (owner) · `{action:"transition"|"assign"|"update"}` (staff) |
+| `PATCH /api/bookings/:id` | owner / assigned driver / staff | `{action:"cancel"}` (customer) · assigned driver progress · assign/reassign/unassign, status, price and notes (staff) |
 | `GET/PATCH /api/profile` · `PUT /api/profile/password` | any | self-service profile + password |
 | `GET /api/admin/stats` | staff | dashboard KPIs |
 | `GET /api/admin/customers` · `GET/PATCH /api/admin/customers/:id` | staff | customer list / detail / suspend |
 | `GET/POST /api/admin/vehicles` · `PATCH/DELETE /api/admin/vehicles/:id` | staff | fleet CRUD |
 | `GET/POST /api/admin/vehicle-types` · `PATCH /api/admin/vehicle-types/:id` | staff | classes + tariffs |
 | `GET/PATCH /api/admin/pricing-rules` | admin | global stop/service fees, ASAP surcharge and GST |
-| `GET/POST /api/admin/drivers` | staff | driver accounts |
+| `GET/POST /api/admin/drivers` · `PATCH /api/admin/drivers/:id` | staff | driver accounts, operating profiles and availability |
+| `PATCH /api/driver/availability` | driver | set own on-duty/off-duty state (cannot leave while assigned) |
 
 ### Permissions
 
@@ -244,7 +255,7 @@ Conventions: JSON in/out, cookie-based auth, `{ error: { code, message, details?
 | customer | `bookings:create`, `bookings:read:own`, `bookings:cancel:own`, `profile:manage` |
 | dispatcher | `bookings:read:any`, `bookings:manage`, `customers:read`, `fleet:read`, `fleet:manage`, `profile:manage` |
 | admin | everything above + `customers:manage`, `users:manage` |
-| driver (future phase) | `bookings:read:assigned`, `bookings:progress`, `profile:manage` |
+| driver | `bookings:read:assigned`, `bookings:progress`, `profile:manage` |
 
 The `/admin/pricing` page and pricing-rules mutation are restricted to the `admin` role.
 
@@ -271,13 +282,14 @@ Admins configure the stop/service fees, ASAP percentage and GST at `/admin/prici
 ## 10. Repository layout
 
 ```
-docs/                      Phase 0 deliverables (this file + FEATURE_SPEC.md)
+docs/                      Architecture and feature spec for Phases 0–3
 src/db/schema.ts           Drizzle schema (source of truth)
-src/lib/                   auth, API helpers, validation, booking/pricing rules, route geocoding, logger, seed
+src/lib/                   auth, API helpers, validation, booking/pricing rules, routing, logger, seed
 src/services/              bookings, users, fleet and pricing data access
-src/components/            UI primitives, address autocomplete, route map, booking wizard, admin managers
+src/components/            UI primitives, maps, booking wizard, admin and driver operations
 src/app/(auth)/            login, register, forgot/reset password
 src/app/(customer)/        dashboard, bookings, profile
-src/app/admin/             admin dashboard, bookings, customers, vehicles, pricing, drivers
-src/app/api/               REST API (autocomplete, routing, quotes, bookings, admin)
+src/app/admin/             dashboard, dispatch, bookings, customers, vehicles, pricing, drivers
+src/app/driver/            active jobs, availability and job progression
+src/app/api/               REST API (auth, dispatch resources, availability, routing, bookings, admin)
 ```

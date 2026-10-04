@@ -33,6 +33,7 @@ const CUSTOMER_NAV: NavItem[] = [
 ];
 const STAFF_NAV: NavItem[] = [
   { href: "/admin", label: "Dashboard", icon: ICONS.chart, exact: true },
+  { href: "/admin/dispatch", label: "Dispatch", icon: ICONS.truck },
   { href: "/admin/bookings", label: "Bookings", icon: ICONS.list },
   { href: "/admin/customers", label: "Customers", icon: ICONS.users },
   { href: "/admin/vehicles", label: "Vehicles", icon: ICONS.truck },
@@ -41,7 +42,7 @@ const STAFF_NAV: NavItem[] = [
   { href: "/profile", label: "My profile", icon: ICONS.user },
 ];
 const DRIVER_NAV: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: ICONS.home },
+  { href: "/driver", label: "My jobs", icon: ICONS.list, exact: true },
   { href: "/profile", label: "Profile", icon: ICONS.user },
 ];
 

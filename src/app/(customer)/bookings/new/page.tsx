@@ -12,6 +12,7 @@ export const dynamic = "force-dynamic";
 export default async function NewBookingPage() {
   const user = await requireUser();
   if (isStaff(user.role)) redirect("/admin/bookings");
+  if (user.role === "driver") redirect("/driver");
   const [vehicleTypes, pricingRules] = await Promise.all([
     listVehicleTypes({ activeOnly: true }),
     getPricingRules(),

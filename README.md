@@ -1,8 +1,8 @@
 # Loadline — on-demand truck booking SaaS (Instatruck-style)
 
-Architecture and feature notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/FEATURE_SPEC.md`](docs/FEATURE_SPEC.md), including the Phase 1 core, Phase 2 maps/quotation, and the future driver workflow.
+Architecture and feature notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/FEATURE_SPEC.md`](docs/FEATURE_SPEC.md), covering the core platform, maps/quotation, and Phase 3 fleet and dispatch operations.
 
-Phase 1 delivers the working core platform: **a customer can create a logistics job and an admin/dispatcher can see and manage it.** Phase 2 adds a real road-routed booking quote and configurable pricing rules.
+Phase 1 delivers the booking and operations foundation; Phase 2 adds mapped routes and configurable quotes; Phase 3 adds capacity-aware fleet management, driver profiles and availability, a dispatch board, and a driver job workspace.
 
 ## Stack
 
@@ -37,7 +37,7 @@ Set the variables for the appropriate Vercel environments (Production and Previe
 
 Run `npm run db:push` once from a trusted machine or CI shell with the **target database's** `DATABASE_URL` set, before serving the deployment. Schema updates are intentionally not run during Vercel builds. Confirm the database accepts connections from Vercel and set the Vercel Function Region near the database (for example, `syd1` for a Sydney-hosted database); this repo leaves the region unset to avoid pinning functions far from your database.
 
-Demo data (admin, dispatcher, customers, drivers, vehicle classes, fleet, sample jobs) is seeded automatically the first time the app talks to an empty database (via `/api/health`, the landing page, or login).
+Demo data (admin, dispatcher, customers, drivers, vehicle classes, fleet, sample jobs) is seeded automatically the first time the app talks to an empty database (via `/api/health`, the landing page, or login). Drivers land on the `/driver` workspace; location labels in Fleet are dispatcher-maintained last-known locations, not live GPS tracking.
 
 ### Demo accounts
 
@@ -46,7 +46,7 @@ Demo data (admin, dispatcher, customers, drivers, vehicle classes, fleet, sample
 | Admin | `admin@loadline.demo` | `Admin123!` | `/admin` |
 | Dispatcher | `dispatch@loadline.demo` | `Dispatch123!` | `/admin` |
 | Customer | `customer@loadline.demo` | `Customer123!` | `/dashboard` |
-| Driver | `driver@loadline.demo` | `Driver123!` | `/dashboard` |
+| Driver | `driver@loadline.demo` | `Driver123!` | `/driver` |
 
 ## What's in Phase 1
 
@@ -67,17 +67,37 @@ Demo data (admin, dispatcher, customers, drivers, vehicle classes, fleet, sample
 
 Route services are implemented with Photon (autocomplete/geocoding), OSRM (driving directions) and OpenStreetMap tiles. The default public endpoints need no key but have no production SLA; replace them with a contracted or self-hosted provider for production workloads.
 
+## Phase 3 — Vehicles & dispatch
+
+- Manage vehicle classes and physical trucks, including rated capacity, operational status, assigned driver, and a dispatcher-maintained last-known location.
+- Create driver accounts and profiles with licence details and on-duty/off-duty availability. Driver availability becomes busy while an assigned job is open; the driver and their usual truck are shown on the dispatch roster.
+- Use `/admin/dispatch` to see jobs missing a driver or compatible truck, including incomplete assigned jobs that need repair. New assignments require an on-duty driver and an available vehicle of the booked class with enough capacity for the load; a valid resource already allocated to the same incomplete job may be retained.
+- Reassign or cancel an assignment from a job's admin detail. These actions release the old vehicle and add an auditable timeline entry. Driver/vehicle collisions are guarded in the service transaction.
+- Drivers sign in to `/driver` to see active assignments, route/contact/load information, and progress jobs through en route → picked up → in transit → delivered. Dispatch closes delivered jobs; failed jobs can be reopened for re-dispatch.
+
+### Job lifecycle
+
+```text
+pending → confirmed (dispatch may assign directly) → assigned → en route to pickup → picked up → in transit → delivered → completed
+   └───────────┴───────────┴────────────────────┴────────→ cancelled (dispatch; customer cancellation ends before en route)
+                                     en route / in transit → failed → confirmed (re-dispatch)
+assigned → confirmed (cancel assignment / release resources)
+```
+
+Vehicle location is an editable last-known label; live GPS tracking, proof-of-delivery capture, notifications, payments and invoice generation remain future work.
+
 ## Project layout
 
 ```
 docs/                 Phase 0 architecture + feature spec
-src/db/schema.ts      Drizzle schema (users, fleet, pricing_rules, bookings, booking_events)
+src/db/schema.ts      Drizzle schema (users, driver_profiles, fleet, pricing_rules, bookings, booking_events)
 src/lib/              auth · api helpers · validation · booking-rules · route geocoding · logger · seed
 src/services/         bookings · users · fleet · pricing (all database access)
-src/components/       UI primitives, app shell, route map, address autocomplete, booking wizard, admin managers
+src/components/       UI primitives, app shell, maps, booking wizard, admin and driver operations
 src/app/(auth)        login · register · forgot-password · reset-password
 src/app/(customer)    dashboard · bookings · bookings/new · bookings/[id] · profile
-src/app/admin         dashboard · bookings · bookings/[id] · customers · customers/[id] · vehicles · pricing · drivers
+src/app/admin         dashboard · dispatch · bookings · customers · vehicles · pricing · drivers
+src/app/driver        active assignment board + job progress
 src/app/api           REST API route handlers
 ```
 

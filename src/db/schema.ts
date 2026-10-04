@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  date,
   doublePrecision,
   index,
   integer,
@@ -24,6 +25,8 @@ export const userRoleEnum = pgEnum("user_role", [
 ]);
 
 export const userStatusEnum = pgEnum("user_status", ["active", "suspended"]);
+
+export const driverAvailabilityEnum = pgEnum("driver_availability", ["available", "off_duty"]);
 
 export const vehicleStatusEnum = pgEnum("vehicle_status", [
   "available",
@@ -71,6 +74,24 @@ export const users = pgTable(
       .defaultNow(),
   },
   (t) => [index("users_role_idx").on(t.role)],
+);
+
+/** Driver-specific operating profile; account status remains on users. */
+export const driverProfiles = pgTable(
+  "driver_profiles",
+  {
+    driverId: integer("driver_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    availability: driverAvailabilityEnum("availability").notNull().default("available"),
+    licenseNumber: text("license_number"),
+    licenseClass: text("license_class"),
+    licenseExpiryDate: date("license_expiry_date", { mode: "string" }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("driver_profiles_availability_idx").on(t.availability)],
 );
 
 export const passwordResetTokens = pgTable(
@@ -139,6 +160,8 @@ export const vehicles = pgTable(
     year: integer("year"),
     capacityKg: integer("capacity_kg"),
     status: vehicleStatusEnum("status").notNull().default("available"),
+    currentLocation: text("current_location"),
+    locationUpdatedAt: timestamp("location_updated_at", { withTimezone: true }),
     driverId: integer("driver_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -287,6 +310,8 @@ export const bookingEvents = pgTable(
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VehicleType = typeof vehicleTypes.$inferSelect;
+export type DriverProfile = typeof driverProfiles.$inferSelect;
+export type DriverAvailability = (typeof driverAvailabilityEnum.enumValues)[number];
 export type Vehicle = typeof vehicles.$inferSelect;
 export type Booking = typeof bookings.$inferSelect;
 export type NewBooking = typeof bookings.$inferInsert;
