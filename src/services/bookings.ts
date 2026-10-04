@@ -1,10 +1,11 @@
-import { and, asc, count, desc, eq, gte, ilike, inArray, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { z } from "zod";
 import { db } from "@/db";
 import {
   bookingEvents,
   bookings,
+  driverProfiles,
   users,
   vehicleTypes,
   vehicles,
@@ -16,14 +17,18 @@ import { errors } from "@/lib/api";
 import type { SafeUser } from "@/lib/auth";
 import {
   ACTIVE_STATUSES,
+  ASSIGNED_STATUSES,
   CUSTOMER_CANCELLABLE,
+  DRIVER_TRANSITIONS,
   STATUS_META,
   calculateQuote,
   canTransition,
   generateReference,
 } from "@/lib/booking-rules";
+import { estimateDrivingRoute } from "@/lib/geocode";
 import { logger } from "@/lib/logger";
 import type { createBookingSchema } from "@/lib/validation";
+import { getPricingRules } from "@/services/pricing";
 
 type CreateBookingInput = z.infer<typeof createBookingSchema>;
 type Actor = Pick<SafeUser, "id" | "role" | "name">;
@@ -51,12 +56,26 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
     throw errors.validation({ pallets: `A ${vt.name} carries at most ${vt.maxPallets} pallets` });
   }
 
+  // Never accept client-supplied distance or coordinates as pricing inputs. Resolve the
+  // entered addresses and recalculate the complete road route on the server at booking time.
+  const [route, pricingRules] = await Promise.all([
+    estimateDrivingRoute(input),
+    getPricingRules(),
+  ]);
+  if (!route) {
+    throw errors.validation(
+      { route: "We couldn't map a driving route for every address. Choose a suggested address or check the spelling, then try again." },
+      "Route unavailable",
+    );
+  }
   const quote = calculateQuote({
     vehicleType: vt,
-    distanceKm: input.distanceKm,
+    distanceKm: route.distanceKm,
+    additionalStops: input.additionalStops.length,
     requiresTailgate: input.requiresTailgate,
     requiresHandUnload: input.requiresHandUnload,
     isAsap: input.isAsap,
+    pricingRules,
   });
   const scheduledAt = input.isAsap ? new Date(Date.now() + 60 * 60 * 1000) : input.scheduledAt!;
 
@@ -84,8 +103,8 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
       pickupContactName: input.pickupContactName ?? null,
       pickupContactPhone: input.pickupContactPhone ?? null,
       pickupInstructions: input.pickupInstructions ?? null,
-      pickupLat: input.pickupLat ?? null,
-      pickupLng: input.pickupLng ?? null,
+      pickupLat: route.pickup.lat,
+      pickupLng: route.pickup.lng,
       dropoffAddress: input.dropoffAddress,
       dropoffSuburb: input.dropoffSuburb ?? null,
       dropoffState: input.dropoffState ?? null,
@@ -93,8 +112,13 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
       dropoffContactName: input.dropoffContactName ?? null,
       dropoffContactPhone: input.dropoffContactPhone ?? null,
       dropoffInstructions: input.dropoffInstructions ?? null,
-      dropoffLat: input.dropoffLat ?? null,
-      dropoffLng: input.dropoffLng ?? null,
+      dropoffLat: route.dropoff.lat,
+      dropoffLng: route.dropoff.lng,
+      additionalStops: route.stops.map((point, index) => ({
+        address: input.additionalStops[index]?.address ?? point.label,
+        lat: point.lat,
+        lng: point.lng,
+      })),
       isAsap: input.isAsap,
       scheduledAt,
       loadDescription: input.loadDescription,
@@ -104,6 +128,7 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
       requiresTailgate: input.requiresTailgate,
       requiresHandUnload: input.requiresHandUnload,
       distanceKm: quote.distanceKm,
+      estimatedDurationMinutes: Math.ceil(route.durationSeconds / 60),
       quotedPriceCents: quote.totalCents,
       paymentMethod: input.paymentMethod,
       customerNotes: input.customerNotes ?? null,
@@ -195,6 +220,41 @@ export async function listBookings(filter: BookingListFilter) {
 }
 export type BookingListRow = Awaited<ReturnType<typeof listBookings>>["rows"][number];
 
+/** Jobs that still need a driver and vehicle; failed jobs must be reopened before re-dispatch. */
+export async function listUnassignedBookings() {
+  return db
+    .select({
+      id: bookings.id,
+      reference: bookings.reference,
+      status: bookings.status,
+      driverId: bookings.driverId,
+      vehicleId: bookings.vehicleId,
+      scheduledAt: bookings.scheduledAt,
+      isAsap: bookings.isAsap,
+      pickupAddress: bookings.pickupAddress,
+      dropoffAddress: bookings.dropoffAddress,
+      vehicleTypeId: bookings.vehicleTypeId,
+      vehicleTypeName: vehicleTypes.name,
+      maxWeightKg: vehicleTypes.maxWeightKg,
+      maxPallets: vehicleTypes.maxPallets,
+      weightKg: bookings.weightKg,
+      pallets: bookings.pallets,
+      quotedPriceCents: bookings.quotedPriceCents,
+      customerName: customer.name,
+      customerCompany: customer.companyName,
+    })
+    .from(bookings)
+    .innerJoin(vehicleTypes, eq(vehicleTypes.id, bookings.vehicleTypeId))
+    .innerJoin(customer, eq(customer.id, bookings.customerId))
+    .where(
+      and(
+        inArray(bookings.status, ["pending", "confirmed", "assigned"]),
+        or(isNull(bookings.driverId), isNull(bookings.vehicleId)),
+      ),
+    )
+    .orderBy(asc(bookings.scheduledAt), asc(bookings.createdAt));
+}
+
 export async function getBookingDetail(id: number) {
   const [row] = await db
     .select({
@@ -250,15 +310,31 @@ export async function transitionBooking(
   to: BookingStatus,
   actor: Actor,
   note?: string,
+  options: { driverId?: number; customerId?: number } = {},
 ): Promise<Booking> {
   return db.transaction(async (tx) => {
     const [b] = await tx.select().from(bookings).where(eq(bookings.id, id)).for("update");
     if (!b) throw errors.notFound("Booking not found");
+    if (options.driverId != null) {
+      if (b.driverId !== options.driverId) throw errors.notFound("Assigned job not found");
+      if (!DRIVER_TRANSITIONS[b.status]?.includes(to)) {
+        throw errors.forbidden("Drivers can only move their own jobs through the driver workflow");
+      }
+    }
+    if (to === "failed" && !note?.trim()) {
+      throw errors.validation({ note: "Explain why this job could not be completed" });
+    }
+    if (options.customerId != null) {
+      if (b.customerId !== options.customerId) throw errors.notFound("Booking not found");
+      if (to !== "cancelled" || !CUSTOMER_CANCELLABLE.includes(b.status)) {
+        throw errors.conflict("This job can no longer be cancelled online. Please contact dispatch.", "NOT_CANCELLABLE");
+      }
+    }
     if (!canTransition(b.status, to)) {
       throw errors.conflict(`Cannot move this job from ${label(b.status)} to ${label(to)}`, "ILLEGAL_TRANSITION");
     }
-    if (to === "assigned" && !b.driverId) {
-      throw errors.conflict("Assign a driver before marking the job as assigned", "DRIVER_REQUIRED");
+    if (to === "assigned") {
+      throw errors.conflict("Use the dispatch assignment action to reserve a driver and compatible vehicle", "ASSIGNMENT_REQUIRED");
     }
 
     const now = new Date();
@@ -273,9 +349,6 @@ export async function transitionBooking(
           patch.assignedAt = null;
           releaseVehicle = true;
         }
-        break;
-      case "assigned":
-        patch.assignedAt = now;
         break;
       case "picked_up":
         patch.pickedUpAt = now;
@@ -331,37 +404,115 @@ export async function assignBooking(
       throw errors.conflict(`A job that is ${label(b.status)} cannot be (re)assigned`, "ILLEGAL_TRANSITION");
     }
 
+    // Lock the driver before checking workload so two dispatchers cannot assign the
+    // same person to different jobs at the same time.
     const [drv] = await tx
       .select({ id: users.id, name: users.name, status: users.status })
       .from(users)
       .where(and(eq(users.id, input.driverId), eq(users.role, "driver")))
-      .limit(1);
+      .for("update");
     if (!drv || drv.status !== "active") throw errors.validation({ driverId: "Select an active driver" });
+    await tx.insert(driverProfiles).values({ driverId: drv.id }).onConflictDoNothing();
+    const [profile] = await tx
+      .select()
+      .from(driverProfiles)
+      .where(eq(driverProfiles.driverId, drv.id))
+      .for("update");
+    if (!profile) throw errors.conflict("This driver has no operating profile", "DRIVER_PROFILE_REQUIRED");
+    if (profile.availability !== "available" && b.driverId !== drv.id) {
+      throw errors.conflict("This driver is off duty and cannot be assigned", "DRIVER_UNAVAILABLE");
+    }
 
-    let vehicleId = input.vehicleId ?? null;
+    const [otherDriverJob] = await tx
+      .select({ id: bookings.id, reference: bookings.reference })
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.driverId, drv.id),
+          inArray(bookings.status, ASSIGNED_STATUSES),
+          ne(bookings.id, id),
+        ),
+      )
+      .limit(1);
+    if (otherDriverJob) {
+      throw errors.conflict(`This driver is already assigned to ${otherDriverJob.reference}`, "DRIVER_BUSY");
+    }
+
+    let vehicleId = input.vehicleId ?? (b.driverId === drv.id ? b.vehicleId : null);
     if (!vehicleId) {
       const [own] = await tx
         .select({ id: vehicles.id })
         .from(vehicles)
-        .where(and(eq(vehicles.driverId, drv.id), inArray(vehicles.status, ["available", "in_use"])))
+        .where(
+          and(
+            eq(vehicles.driverId, drv.id),
+            eq(vehicles.vehicleTypeId, b.vehicleTypeId),
+            eq(vehicles.status, "available"),
+          ),
+        )
         .limit(1);
       vehicleId = own?.id ?? null;
     }
-    let rego: string | null = null;
-    if (vehicleId) {
-      const [v] = await tx.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
-      if (!v || v.status === "inactive" || v.status === "maintenance") {
-        throw errors.validation({ vehicleId: "Select an available vehicle" });
-      }
-      rego = v.registration;
+    if (!vehicleId) {
+      throw errors.validation({ vehicleId: "Select an available vehicle in the booked class" });
     }
+
+    const [v] = await tx.select().from(vehicles).where(eq(vehicles.id, vehicleId)).for("update");
+    if (!v) throw errors.validation({ vehicleId: "Select a valid vehicle" });
+    if (v.vehicleTypeId !== b.vehicleTypeId) {
+      throw errors.validation({ vehicleId: "Vehicle class must match the customer's booking" });
+    }
+    if (v.driverId != null && v.driverId !== drv.id) {
+      throw errors.validation({ vehicleId: "This vehicle is assigned to a different driver" });
+    }
+    const keepingCurrentVehicle = b.vehicleId === v.id;
+    if (v.status !== "available" && !(keepingCurrentVehicle && v.status === "in_use")) {
+      throw errors.conflict("This vehicle is not available for dispatch", "VEHICLE_UNAVAILABLE");
+    }
+
+    const [otherVehicleJob] = await tx
+      .select({ id: bookings.id, reference: bookings.reference })
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.vehicleId, v.id),
+          inArray(bookings.status, ASSIGNED_STATUSES),
+          ne(bookings.id, id),
+        ),
+      )
+      .limit(1);
+    if (otherVehicleJob) {
+      throw errors.conflict(`This vehicle is already allocated to ${otherVehicleJob.reference}`, "VEHICLE_BUSY");
+    }
+
+    const [type] = await tx
+      .select({ name: vehicleTypes.name, maxWeightKg: vehicleTypes.maxWeightKg, maxPallets: vehicleTypes.maxPallets })
+      .from(vehicleTypes)
+      .where(eq(vehicleTypes.id, v.vehicleTypeId))
+      .for("share")
+      .limit(1);
+    if (!type) throw errors.validation({ vehicleId: "Vehicle class is no longer available" });
+    const capacityKg = Math.min(v.capacityKg ?? type.maxWeightKg, type.maxWeightKg);
+    if (b.weightKg != null && b.weightKg > capacityKg) {
+      throw errors.validation({ vehicleId: `This truck carries up to ${capacityKg.toLocaleString()} kg, below the booked load weight` });
+    }
+    if (type.maxPallets != null && b.pallets > type.maxPallets) {
+      throw errors.validation({ vehicleId: `This truck carries at most ${type.maxPallets} pallets` });
+    }
+
+    const [previousDriver] = b.driverId && b.driverId !== drv.id
+      ? await tx.select({ name: users.name }).from(users).where(eq(users.id, b.driverId)).limit(1)
+      : [undefined];
+    const [previousVehicle] = b.vehicleId && b.vehicleId !== v.id
+      ? await tx.select({ registration: vehicles.registration }).from(vehicles).where(eq(vehicles.id, b.vehicleId)).limit(1)
+      : [undefined];
 
     const now = new Date();
     const [updated] = await tx
       .update(bookings)
       .set({
         driverId: drv.id,
-        vehicleId,
+        vehicleId: v.id,
         status: "assigned",
         confirmedAt: b.confirmedAt ?? now,
         assignedAt: now,
@@ -370,17 +521,18 @@ export async function assignBooking(
       .where(eq(bookings.id, id))
       .returning();
 
-    if (b.vehicleId && b.vehicleId !== vehicleId) {
+    if (b.vehicleId && b.vehicleId !== v.id) {
       await tx
         .update(vehicles)
         .set({ status: "available", updatedAt: now })
         .where(and(eq(vehicles.id, b.vehicleId), eq(vehicles.status, "in_use")));
     }
-    if (vehicleId) {
-      await tx.update(vehicles).set({ status: "in_use", updatedAt: now }).where(eq(vehicles.id, vehicleId));
-    }
+    await tx.update(vehicles).set({ status: "in_use", updatedAt: now }).where(eq(vehicles.id, v.id));
 
-    const summary = `Assigned to ${drv.name}${rego ? ` (${rego})` : ""}`;
+    const assignedTo = `${drv.name} (${v.registration})`;
+    const summary = previousDriver || previousVehicle
+      ? `Reassigned from ${previousDriver?.name ?? "previous driver"}${previousVehicle?.registration ? ` (${previousVehicle.registration})` : ""} to ${assignedTo}`
+      : `Assigned to ${assignedTo}`;
     await tx.insert(bookingEvents).values({
       bookingId: id,
       fromStatus: b.status,
@@ -389,24 +541,19 @@ export async function assignBooking(
       actorRole: actor.role,
       note: note ? `${summary} — ${note}` : summary,
     });
-    logger.info("booking.assigned", { bookingId: id, driverId: drv.id, vehicleId, actorId: actor.id });
+    logger.info("booking.assigned", { bookingId: id, driverId: drv.id, vehicleId: v.id, actorId: actor.id });
     return updated;
   });
 }
 
 export async function cancelBooking(id: number, actor: Actor, reason: string | undefined, asCustomer: boolean) {
-  const [b] = await db.select().from(bookings).where(eq(bookings.id, id)).limit(1);
-  if (!b) throw errors.notFound("Booking not found");
-  if (asCustomer) {
-    if (b.customerId !== actor.id) throw errors.notFound("Booking not found");
-    if (!CUSTOMER_CANCELLABLE.includes(b.status)) {
-      throw errors.conflict(
-        `This job is already ${label(b.status)} and can no longer be cancelled online. Please contact dispatch.`,
-        "NOT_CANCELLABLE",
-      );
-    }
-  }
-  return transitionBooking(id, "cancelled", actor, reason || (asCustomer ? "Cancelled by customer" : "Cancelled by dispatch"));
+  return transitionBooking(
+    id,
+    "cancelled",
+    actor,
+    reason || (asCustomer ? "Cancelled by customer" : "Cancelled by dispatch"),
+    asCustomer ? { customerId: actor.id } : {},
+  );
 }
 
 export async function updateBookingAdmin(
@@ -442,6 +589,44 @@ export async function updateBookingAdmin(
     });
   }
   return updated;
+}
+
+/** Operational board for a driver: only jobs actively assigned to their account. */
+export async function listDriverJobs(driverId: number) {
+  return db
+    .select({
+      id: bookings.id,
+      reference: bookings.reference,
+      status: bookings.status,
+      scheduledAt: bookings.scheduledAt,
+      isAsap: bookings.isAsap,
+      pickupAddress: bookings.pickupAddress,
+      pickupContactName: bookings.pickupContactName,
+      pickupContactPhone: bookings.pickupContactPhone,
+      pickupInstructions: bookings.pickupInstructions,
+      dropoffAddress: bookings.dropoffAddress,
+      dropoffContactName: bookings.dropoffContactName,
+      dropoffContactPhone: bookings.dropoffContactPhone,
+      dropoffInstructions: bookings.dropoffInstructions,
+      additionalStops: bookings.additionalStops,
+      loadDescription: bookings.loadDescription,
+      weightKg: bookings.weightKg,
+      pallets: bookings.pallets,
+      itemCount: bookings.itemCount,
+      estimatedDurationMinutes: bookings.estimatedDurationMinutes,
+      distanceKm: bookings.distanceKm,
+      customerNotes: bookings.customerNotes,
+      vehicleTypeName: vehicleTypes.name,
+      vehicleRegistration: vehicles.registration,
+      vehicleMake: vehicles.make,
+      customerName: customer.name,
+    })
+    .from(bookings)
+    .innerJoin(vehicleTypes, eq(vehicleTypes.id, bookings.vehicleTypeId))
+    .innerJoin(customer, eq(customer.id, bookings.customerId))
+    .leftJoin(vehicles, eq(vehicles.id, bookings.vehicleId))
+    .where(and(eq(bookings.driverId, driverId), inArray(bookings.status, ASSIGNED_STATUSES)))
+    .orderBy(asc(bookings.scheduledAt), asc(bookings.assignedAt));
 }
 
 // ---------------------------------------------------------------------------

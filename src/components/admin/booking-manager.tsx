@@ -7,8 +7,28 @@ import { Alert, Button, Card, CardHeader, Field, Input, Select, Textarea } from 
 import { STATUS_META, TRANSITIONS, TRANSITION_LABELS } from "@/lib/booking-rules";
 import { api, errorMessage, fieldErrors } from "@/lib/client-api";
 
-type Driver = { id: number; name: string; vehicleId: number | null; vehicleRegistration: string | null; activeJobs: number; status: string };
-type Vehicle = { id: number; registration: string; typeName: string; status: string; driverId: number | null; vehicleTypeId: number };
+type Driver = {
+  id: number;
+  name: string;
+  vehicleId: number | null;
+  vehicleRegistration: string | null;
+  activeJobs: number;
+  status: string;
+  availability: "available" | "off_duty";
+  dispatchStatus: "available" | "off_duty" | "busy" | "suspended";
+  currentJob: { reference: string } | null;
+};
+type Vehicle = {
+  id: number;
+  registration: string;
+  typeName: string;
+  status: string;
+  driverId: number | null;
+  vehicleTypeId: number;
+  capacityKg: number | null;
+  typeMaxWeightKg: number;
+  typeMaxPallets: number | null;
+};
 
 type Props = {
   booking: {
@@ -17,6 +37,8 @@ type Props = {
     driverId: number | null;
     vehicleId: number | null;
     vehicleTypeId: number;
+    weightKg: number | null;
+    pallets: number;
     quotedPriceCents: number;
     finalPriceCents: number | null;
     adminNotes: string | null;
@@ -58,11 +80,32 @@ export function BookingManager({ booking, drivers, vehicles }: Props) {
   function pickDriver(id: string) {
     setDriverId(id);
     const d = drivers.find((x) => String(x.id) === id);
-    if (d?.vehicleId) setVehicleId(String(d.vehicleId));
+    const compatible = vehicles.filter((v) =>
+      (v.status === "available" || v.id === booking.vehicleId) &&
+      v.vehicleTypeId === booking.vehicleTypeId &&
+      (v.driverId == null || v.driverId === d?.id) &&
+      (booking.weightKg == null || booking.weightKg <= Math.min(v.capacityKg ?? v.typeMaxWeightKg, v.typeMaxWeightKg)) &&
+      (v.typeMaxPallets == null || booking.pallets <= v.typeMaxPallets),
+    );
+    const driverVehicle = compatible.find((v) => v.id === d?.vehicleId);
+    setVehicleId(String(driverVehicle?.id ?? compatible[0]?.id ?? ""));
   }
 
-  const matchingVehicles = vehicles.filter((v) => v.vehicleTypeId === booking.vehicleTypeId);
-  const otherVehicles = vehicles.filter((v) => v.vehicleTypeId !== booking.vehicleTypeId);
+  const matchingVehicles = vehicles.filter((v) =>
+    v.vehicleTypeId === booking.vehicleTypeId &&
+    (booking.weightKg == null || booking.weightKg <= Math.min(v.capacityKg ?? v.typeMaxWeightKg, v.typeMaxWeightKg)) &&
+    (v.typeMaxPallets == null || booking.pallets <= v.typeMaxPallets),
+  );
+  const selectedDriver = drivers.find((d) => String(d.id) === driverId);
+  const driverCanBeAssigned = selectedDriver?.status === "active" && (
+    selectedDriver.dispatchStatus === "available" ||
+    (booking.status === "assigned" && selectedDriver.id === booking.driverId && selectedDriver.activeJobs <= 1)
+  );
+  const availableForSelectedDriver = matchingVehicles.filter((v) =>
+    (v.driverId == null || v.driverId === selectedDriver?.id) &&
+    (v.status === "available" || v.id === booking.vehicleId),
+  );
+  const selectedVehicle = availableForSelectedDriver.find((v) => String(v.id) === vehicleId);
 
   return (
     <div className="space-y-6">
@@ -94,7 +137,7 @@ export function BookingManager({ booking, drivers, vehicles }: Props) {
                           : act(s, { action: "transition", status: s, note: note || undefined })
                       }
                     >
-                      {isUnassign ? "Unassign driver" : TRANSITION_LABELS[s]}
+                      {isUnassign ? "Cancel assignment" : TRANSITION_LABELS[s]}
                     </Button>
                   );
                 })}
@@ -106,45 +149,45 @@ export function BookingManager({ booking, drivers, vehicles }: Props) {
 
       {canAssign && (
         <Card>
-          <CardHeader title={booking.driverId ? "Reassign driver & vehicle" : "Assign driver & vehicle"} description="Assigning also confirms a pending job." />
+          <CardHeader title={booking.driverId ? "Reassign driver & vehicle" : "Assign driver & vehicle"} description="A compatible truck is required. Assignment confirms a pending job and reserves both resources." />
           <div className="space-y-4 p-5">
             <Field label="Driver" error={fields.driverId} required>
               <Select value={driverId} onChange={(e) => pickDriver(e.target.value)}>
-                <option value="">Select a driver…</option>
+                <option value="">Select an available driver…</option>
                 {drivers.map((d) => (
-                  <option key={d.id} value={d.id} disabled={d.status !== "active"}>
-                    {d.name}
-                    {d.vehicleRegistration ? ` · ${d.vehicleRegistration}` : ""} · {d.activeJobs} active job{d.activeJobs === 1 ? "" : "s"}
+                  <option
+                    key={d.id}
+                    value={d.id}
+                    disabled={d.status !== "active" || (d.dispatchStatus !== "available" && d.id !== booking.driverId)}
+                  >
+                    {d.name} · {d.dispatchStatus.replace("_", " ")}
+                    {d.vehicleRegistration ? ` · ${d.vehicleRegistration}` : " · no linked truck"}
+                    {d.currentJob ? ` · ${d.currentJob.reference}` : ""}
                   </option>
                 ))}
               </Select>
             </Field>
-            <Field label="Vehicle" error={fields.vehicleId} hint="Defaults to the driver's usual vehicle.">
+            <Field label="Compatible vehicle" error={fields.vehicleId} required hint={booking.weightKg ? `Load: ${booking.weightKg.toLocaleString()} kg · ${booking.pallets} pallets.` : `${booking.pallets} pallets.`}>
               <Select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)}>
-                <option value="">Driver's own vehicle / decide later</option>
-                {matchingVehicles.length > 0 && (
-                  <optgroup label="Matching vehicle class">
-                    {matchingVehicles.map((v) => (
-                      <option key={v.id} value={v.id}>{v.registration} · {v.typeName} ({v.status.replace("_", " ")})</option>
-                    ))}
-                  </optgroup>
-                )}
-                {otherVehicles.length > 0 && (
-                  <optgroup label="Other classes">
-                    {otherVehicles.map((v) => (
-                      <option key={v.id} value={v.id}>{v.registration} · {v.typeName} ({v.status.replace("_", " ")})</option>
-                    ))}
-                  </optgroup>
-                )}
+                <option value="">Select an available truck…</option>
+                {availableForSelectedDriver.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.registration} · {v.typeName} · {Math.min(v.capacityKg ?? v.typeMaxWeightKg, v.typeMaxWeightKg).toLocaleString()} kg capacity
+                    {v.status === "in_use" ? " · current assignment" : ""}
+                  </option>
+                ))}
               </Select>
+              {driverId && availableForSelectedDriver.length === 0 && (
+                <p className="mt-1 text-xs text-amber-700">No available truck in this class and capacity is linked to this driver. Assign an unallocated vehicle in Fleet or choose another driver.</p>
+              )}
             </Field>
             <Button
               variant="dark"
               loading={busy === "assign"}
-              disabled={busy !== null || !driverId}
-              onClick={() => act("assign", { action: "assign", driverId: Number(driverId), vehicleId: vehicleId ? Number(vehicleId) : undefined, note: note || undefined })}
+              disabled={busy !== null || !driverCanBeAssigned || !selectedVehicle}
+              onClick={() => act("assign", { action: "assign", driverId: Number(driverId), vehicleId: Number(vehicleId), note: note || undefined })}
             >
-              {booking.driverId ? "Update assignment" : "Assign & confirm"}
+              {booking.driverId ? "Save reassignment" : "Assign & confirm"}
             </Button>
           </div>
         </Card>

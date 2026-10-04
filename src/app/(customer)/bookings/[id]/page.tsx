@@ -5,7 +5,7 @@ import { CancelBookingButton } from "@/components/booking-actions";
 import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
 import { isStaff, requireUser } from "@/lib/auth";
 import { CUSTOMER_CANCELLABLE, STATUS_META } from "@/lib/booking-rules";
-import { formatDateTime, formatKm, formatMoney, titleCase } from "@/lib/utils";
+import { formatDateTime, formatDuration, formatKm, formatMoney, titleCase } from "@/lib/utils";
 import { getBookingDetail } from "@/services/bookings";
 
 export const metadata: Metadata = { title: "Booking" };
@@ -19,6 +19,7 @@ export default async function BookingDetailPage({
   searchParams: Promise<{ created?: string }>;
 }) {
   const user = await requireUser();
+  if (user.role === "driver") redirect("/driver");
   const { id } = await params;
   const { created } = await searchParams;
   const bookingId = Number(id);
@@ -28,10 +29,18 @@ export default async function BookingDetailPage({
   const detail = await getBookingDetail(bookingId);
   if (!detail) notFound();
   const { booking: b } = detail;
-  const ownsIt = b.customerId === user.id || (user.role === "driver" && b.driverId === user.id);
+  const ownsIt = b.customerId === user.id;
   if (!ownsIt) notFound();
 
   const canCancel = b.customerId === user.id && CUSTOMER_CANCELLABLE.includes(b.status);
+  const directionsUrl = new URL("https://www.google.com/maps/dir/");
+  directionsUrl.searchParams.set("api", "1");
+  directionsUrl.searchParams.set("origin", b.pickupAddress);
+  directionsUrl.searchParams.set("destination", b.dropoffAddress);
+  if (b.additionalStops?.length) {
+    directionsUrl.searchParams.set("waypoints", b.additionalStops.map((stop) => stop.address).join("|"));
+  }
+  directionsUrl.searchParams.set("travelmode", "driving");
 
   return (
     <>
@@ -59,9 +68,15 @@ export default async function BookingDetailPage({
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
         <div className="space-y-6">
           <Card>
-            <CardHeader title="Route" />
+            <CardHeader
+              title="Route"
+              action={<a href={directionsUrl.toString()} target="_blank" rel="noreferrer" className="text-xs font-semibold text-orange-700 hover:text-orange-800">Open in Google Maps ↗</a>}
+            />
             <div className="grid gap-6 p-5 md:grid-cols-2">
               <Stop label="Pickup" tone="emerald" address={b.pickupAddress} contact={b.pickupContactName} phone={b.pickupContactPhone} instructions={b.pickupInstructions} />
+              {b.additionalStops?.map((stop, index) => (
+                <Stop key={`${stop.address}-${index}`} label={`Stop ${index + 1}`} tone="orange" address={stop.address} contact={null} phone={null} instructions={null} />
+              ))}
               <Stop label="Delivery" tone="orange" address={b.dropoffAddress} contact={b.dropoffContactName} phone={b.dropoffContactPhone} instructions={b.dropoffInstructions} />
             </div>
           </Card>
@@ -74,7 +89,8 @@ export default async function BookingDetailPage({
                 items={[
                   { label: "Pickup time", value: <>{formatDateTime(b.scheduledAt)}{b.isAsap && <span className="ml-1 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-700">ASAP</span>}</> },
                   { label: "Vehicle", value: detail.vehicleType.name },
-                  { label: "Distance", value: formatKm(b.distanceKm) },
+                  { label: "Road distance", value: formatKm(b.distanceKm) },
+                  { label: "Estimated drive", value: b.estimatedDurationMinutes != null ? formatDuration(b.estimatedDurationMinutes * 60) : "—" },
                   { label: "Load", value: b.loadDescription },
                   { label: "Weight / pallets / items", value: `${b.weightKg ? `${b.weightKg.toLocaleString()} kg` : "—"} · ${b.pallets} pallets · ${b.itemCount ?? "—"} items` },
                   { label: "Extras", value: [b.requiresTailgate && "Tailgate lifter", b.requiresHandUnload && "Hand unload"].filter(Boolean).join(", ") || "None" },

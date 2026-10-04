@@ -2,9 +2,11 @@ import { and, count, desc, eq, gt, ilike, inArray, isNull, or, sql } from "drizz
 import { db } from "@/db";
 import {
   bookings,
+  driverProfiles,
   passwordResetTokens,
   users,
   vehicles,
+  type DriverAvailability,
   type User,
   type UserRole,
   type UserStatus,
@@ -18,8 +20,10 @@ import {
   verifyPassword,
   type SafeUser,
 } from "@/lib/auth";
-import { ACTIVE_STATUSES } from "@/lib/booking-rules";
+import { ACTIVE_STATUSES, ASSIGNED_STATUSES } from "@/lib/booking-rules";
 import { logger } from "@/lib/logger";
+import type { z } from "zod";
+import type { createDriverSchema, driverProfileUpdateSchema } from "@/lib/validation";
 
 const RESET_TTL_MS = 60 * 60 * 1000;
 
@@ -240,51 +244,207 @@ export async function setUserStatus(id: number, status: UserStatus): Promise<Saf
 // Drivers
 // ---------------------------------------------------------------------------
 
+export type DriverCurrentJob = {
+  id: number;
+  reference: string;
+  status: (typeof bookings.$inferSelect)["status"];
+  scheduledAt: Date;
+  pickupAddress: string;
+  dropoffAddress: string;
+};
+
 export type DriverRow = SafeUser & {
+  availability: DriverAvailability;
+  licenseNumber: string | null;
+  licenseClass: string | null;
+  licenseExpiryDate: string | null;
+  driverNotes: string | null;
   vehicleId: number | null;
   vehicleRegistration: string | null;
   activeJobs: number;
+  currentJob: DriverCurrentJob | null;
+  dispatchStatus: "available" | "off_duty" | "busy" | "suspended";
 };
 
-export async function listDrivers(): Promise<DriverRow[]> {
-  const activeJobs = db
-    .select({
-      driverId: bookings.driverId,
-      activeJobs: sql<number>`count(*)::int`.as("active_jobs"),
-    })
-    .from(bookings)
-    .where(inArray(bookings.status, ACTIVE_STATUSES))
-    .groupBy(bookings.driverId)
-    .as("active_jobs");
+type CreateDriverInput = z.infer<typeof createDriverSchema>;
+type DriverProfileUpdate = z.infer<typeof driverProfileUpdateSchema>;
 
+async function ensureDriverProfiles() {
+  const driverRows = await db.select({ driverId: users.id }).from(users).where(eq(users.role, "driver"));
+  if (driverRows.length) {
+    await db.insert(driverProfiles).values(driverRows.map(({ driverId }) => ({ driverId }))).onConflictDoNothing();
+  }
+}
+
+export async function listDrivers(): Promise<DriverRow[]> {
+  // Backfill profiles for driver accounts created before the profile table existed.
+  await ensureDriverProfiles();
   const rows = await db
     .select({
       user: users,
+      profile: driverProfiles,
       vehicleId: vehicles.id,
       vehicleRegistration: vehicles.registration,
-      activeJobs: sql<number>`coalesce(${activeJobs.activeJobs}, 0)::int`,
+      jobId: bookings.id,
+      jobReference: bookings.reference,
+      jobStatus: bookings.status,
+      jobScheduledAt: bookings.scheduledAt,
+      jobPickupAddress: bookings.pickupAddress,
+      jobDropoffAddress: bookings.dropoffAddress,
     })
     .from(users)
+    .leftJoin(driverProfiles, eq(driverProfiles.driverId, users.id))
     .leftJoin(vehicles, eq(vehicles.driverId, users.id))
-    .leftJoin(activeJobs, eq(activeJobs.driverId, users.id))
+    .leftJoin(bookings, and(eq(bookings.driverId, users.id), inArray(bookings.status, ASSIGNED_STATUSES)))
     .where(eq(users.role, "driver"))
-    .orderBy(users.name);
+    .orderBy(users.name, bookings.scheduledAt);
 
-  // A driver may be linked to multiple vehicles; keep the first per driver.
-  const seen = new Map<number, DriverRow>();
-  for (const r of rows) {
-    if (!seen.has(r.user.id)) {
-      seen.set(r.user.id, {
-        ...toSafeUser(r.user),
-        vehicleId: r.vehicleId,
-        vehicleRegistration: r.vehicleRegistration,
-        activeJobs: r.activeJobs,
-      });
+  const drivers = new Map<number, DriverRow>();
+  const seenJobs = new Map<number, Set<number>>();
+  for (const row of rows) {
+    let driver = drivers.get(row.user.id);
+    if (!driver) {
+      const availability = row.profile?.availability ?? "available";
+      driver = {
+        ...toSafeUser(row.user),
+        availability,
+        licenseNumber: row.profile?.licenseNumber ?? null,
+        licenseClass: row.profile?.licenseClass ?? null,
+        licenseExpiryDate: row.profile?.licenseExpiryDate ?? null,
+        driverNotes: row.profile?.notes ?? null,
+        vehicleId: row.vehicleId,
+        vehicleRegistration: row.vehicleRegistration,
+        activeJobs: 0,
+        currentJob: null,
+        dispatchStatus: row.user.status !== "active" ? "suspended" : availability,
+      };
+      drivers.set(row.user.id, driver);
+      seenJobs.set(row.user.id, new Set());
     }
+    if (row.jobId != null && row.jobReference && row.jobStatus && row.jobScheduledAt && row.jobPickupAddress && row.jobDropoffAddress) {
+      const driverJobs = seenJobs.get(row.user.id)!;
+      if (!driverJobs.has(row.jobId)) {
+        driverJobs.add(row.jobId);
+        driver.activeJobs += 1;
+        if (!driver.currentJob) {
+          driver.currentJob = {
+            id: row.jobId,
+            reference: row.jobReference,
+            status: row.jobStatus,
+            scheduledAt: row.jobScheduledAt,
+            pickupAddress: row.jobPickupAddress,
+            dropoffAddress: row.jobDropoffAddress,
+          };
+        }
+      }
+    }
+    if (driver.activeJobs > 0 && driver.dispatchStatus !== "suspended") driver.dispatchStatus = "busy";
   }
-  return [...seen.values()];
+  return [...drivers.values()];
 }
 
-export async function createDriver(input: { name: string; email: string; phone?: string; password: string }) {
-  return createUser({ ...input, role: "driver" });
+export async function createDriver(input: CreateDriverInput) {
+  const existing = await findUserByEmail(input.email);
+  if (existing) throw errors.conflict("An account with this email already exists", "EMAIL_TAKEN");
+  const passwordHash = await hashPassword(input.password);
+  const result = await db.transaction(async (tx) => {
+    const [user] = await tx
+      .insert(users)
+      .values({
+        email: input.email.toLowerCase(),
+        passwordHash,
+        name: input.name,
+        phone: input.phone ?? null,
+        role: "driver",
+      })
+      .returning();
+    const [profile] = await tx
+      .insert(driverProfiles)
+      .values({
+        driverId: user.id,
+        availability: input.availability,
+        licenseNumber: input.licenseNumber ?? null,
+        licenseClass: input.licenseClass ?? null,
+        licenseExpiryDate: input.licenseExpiryDate ?? null,
+        notes: input.notes ?? null,
+      })
+      .returning();
+    return { user, profile };
+  });
+  logger.info("driver.created", { driverId: result.user.id });
+  return {
+    ...toSafeUser(result.user),
+    availability: result.profile.availability,
+    licenseNumber: result.profile.licenseNumber,
+    licenseClass: result.profile.licenseClass,
+    licenseExpiryDate: result.profile.licenseExpiryDate,
+    driverNotes: result.profile.notes,
+  };
+}
+
+export async function updateDriverProfile(id: number, input: DriverProfileUpdate) {
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.id, id), eq(users.role, "driver")))
+    .limit(1);
+  if (!existing) throw errors.notFound("Driver not found");
+  const email = input.email?.toLowerCase();
+  if (email && email !== existing.email) {
+    const duplicate = await findUserByEmail(email);
+    if (duplicate && duplicate.id !== id) throw errors.conflict("An account with this email already exists", "EMAIL_TAKEN");
+  }
+
+  await db.insert(driverProfiles).values({ driverId: id }).onConflictDoNothing();
+  const result = await db.transaction(async (tx) => {
+    const [user] = await tx.select().from(users).where(eq(users.id, id)).for("update");
+    if (!user || user.role !== "driver") throw errors.notFound("Driver not found");
+    const [profile] = await tx.select().from(driverProfiles).where(eq(driverProfiles.driverId, id)).for("update");
+    if (!profile) throw errors.notFound("Driver profile not found");
+
+    const [activeJob] = await tx
+      .select({ id: bookings.id })
+      .from(bookings)
+      .where(and(eq(bookings.driverId, id), inArray(bookings.status, ASSIGNED_STATUSES)))
+      .limit(1);
+    if (activeJob && input.status === "suspended") {
+      throw errors.conflict("Reassign or complete this driver's active job before suspending the account", "DRIVER_BUSY");
+    }
+    if (activeJob && input.availability === "off_duty") {
+      throw errors.conflict("Reassign or complete this driver's active job before marking them off duty", "DRIVER_BUSY");
+    }
+
+    const userPatch: Partial<typeof users.$inferInsert> = { updatedAt: new Date() };
+    if (input.name !== undefined) userPatch.name = input.name;
+    if (email !== undefined) userPatch.email = email;
+    if (input.phone !== undefined) userPatch.phone = input.phone;
+    if (input.status !== undefined) userPatch.status = input.status;
+    const [updatedUser] = await tx.update(users).set(userPatch).where(eq(users.id, id)).returning();
+
+    const profilePatch: Partial<typeof driverProfiles.$inferInsert> = { updatedAt: new Date() };
+    if (input.availability !== undefined) profilePatch.availability = input.availability;
+    if (input.licenseNumber !== undefined) profilePatch.licenseNumber = input.licenseNumber;
+    if (input.licenseClass !== undefined) profilePatch.licenseClass = input.licenseClass;
+    if (input.licenseExpiryDate !== undefined) profilePatch.licenseExpiryDate = input.licenseExpiryDate;
+    if (input.notes !== undefined) profilePatch.notes = input.notes;
+    const [updatedProfile] = await tx
+      .update(driverProfiles)
+      .set(profilePatch)
+      .where(eq(driverProfiles.driverId, id))
+      .returning();
+    return { user: updatedUser, profile: updatedProfile };
+  });
+  logger.info("driver.profile.updated", { driverId: id });
+  return {
+    ...toSafeUser(result.user),
+    availability: result.profile.availability,
+    licenseNumber: result.profile.licenseNumber,
+    licenseClass: result.profile.licenseClass,
+    licenseExpiryDate: result.profile.licenseExpiryDate,
+    driverNotes: result.profile.notes,
+  };
+}
+
+export async function setDriverAvailability(id: number, availability: DriverAvailability) {
+  return updateDriverProfile(id, { availability });
 }

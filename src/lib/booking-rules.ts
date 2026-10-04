@@ -80,6 +80,23 @@ export const ACTIVE_STATUSES: BookingStatus[] = [
   "in_transit",
   "delivered",
 ];
+
+/** A driver/vehicle is held while an assigned job is open; pending and confirmed jobs do not reserve resources. */
+export const ASSIGNED_STATUSES: BookingStatus[] = [
+  "assigned",
+  "en_route_pickup",
+  "picked_up",
+  "in_transit",
+  "delivered",
+];
+
+export const DRIVER_TRANSITIONS: Partial<Record<BookingStatus, BookingStatus[]>> = {
+  assigned: ["en_route_pickup"],
+  en_route_pickup: ["picked_up", "failed"],
+  picked_up: ["in_transit"],
+  in_transit: ["delivered", "failed"],
+};
+
 export const TERMINAL_STATUSES: BookingStatus[] = ["completed", "cancelled", "failed"];
 export const CUSTOMER_CANCELLABLE: BookingStatus[] = ["pending", "confirmed", "assigned"];
 
@@ -109,19 +126,31 @@ export function generateReference(length = 6) {
 // Pricing
 // ---------------------------------------------------------------------------
 
-export const EXTRA_FEES = {
-  tailgateCents: 2500,
-  handUnloadCents: 4500,
-  asapSurchargeRate: 0.15,
+/** Rates stored in the singleton pricing_rules table (percentages are basis points). */
+export type PricingRules = {
+  additionalStopFeeCents: number;
+  tailgateFeeCents: number;
+  handUnloadFeeCents: number;
+  asapSurchargeBasisPoints: number;
+  gstRateBasisPoints: number;
 };
-export const GST_RATE = 0.1;
+
+export const DEFAULT_PRICING_RULES: PricingRules = {
+  additionalStopFeeCents: 1500,
+  tailgateFeeCents: 2500,
+  handUnloadFeeCents: 4500,
+  asapSurchargeBasisPoints: 1500,
+  gstRateBasisPoints: 1000,
+};
 
 export type QuoteInput = {
   vehicleType: Pick<VehicleType, "baseFareCents" | "perKmRateCents" | "minimumChargeCents">;
   distanceKm: number;
+  additionalStops?: number;
   requiresTailgate?: boolean;
   requiresHandUnload?: boolean;
   isAsap?: boolean;
+  pricingRules?: PricingRules;
 };
 
 export type QuoteBreakdown = {
@@ -130,41 +159,55 @@ export type QuoteBreakdown = {
   distanceCents: number;
   coreCents: number;
   minimumApplied: boolean;
+  minimumAdjustmentCents: number;
   extras: { label: string; cents: number }[];
   subtotalCents: number;
+  gstRateBasisPoints: number;
   gstCents: number;
   totalCents: number;
 };
 
 export function calculateQuote(input: QuoteInput): QuoteBreakdown {
   const { vehicleType } = input;
+  const rules = input.pricingRules ?? DEFAULT_PRICING_RULES;
   const distanceKm = Math.max(0, Math.round(input.distanceKm * 10) / 10);
   const baseFareCents = vehicleType.baseFareCents;
   const distanceCents = Math.round(distanceKm * vehicleType.perKmRateCents);
   const raw = baseFareCents + distanceCents;
   const minimumApplied = raw < vehicleType.minimumChargeCents;
   const coreCents = Math.max(raw, vehicleType.minimumChargeCents);
+  const minimumAdjustmentCents = coreCents - raw;
+  const stopCount = Math.max(0, Math.trunc(input.additionalStops ?? 0));
 
   const extras: { label: string; cents: number }[] = [];
-  if (input.requiresTailgate) extras.push({ label: "Tailgate lifter", cents: EXTRA_FEES.tailgateCents });
-  if (input.requiresHandUnload) extras.push({ label: "Hand unload", cents: EXTRA_FEES.handUnloadCents });
-  if (input.isAsap) {
+  if (stopCount > 0) {
     extras.push({
-      label: "ASAP priority (15%)",
-      cents: Math.round(coreCents * EXTRA_FEES.asapSurchargeRate),
+      label: `Additional stops (${stopCount} × $${(rules.additionalStopFeeCents / 100).toFixed(2)})`,
+      cents: rules.additionalStopFeeCents * stopCount,
+    });
+  }
+  if (input.requiresTailgate) extras.push({ label: "Tailgate lifter", cents: rules.tailgateFeeCents });
+  if (input.requiresHandUnload) extras.push({ label: "Hand unload", cents: rules.handUnloadFeeCents });
+  if (input.isAsap && rules.asapSurchargeBasisPoints > 0) {
+    const percent = rules.asapSurchargeBasisPoints / 100;
+    extras.push({
+      label: `ASAP priority (${percent.toFixed(percent % 1 === 0 ? 0 : 2)}%)`,
+      cents: Math.round((coreCents * rules.asapSurchargeBasisPoints) / 10_000),
     });
   }
 
-  const subtotalCents = coreCents + extras.reduce((s, e) => s + e.cents, 0);
-  const gstCents = Math.round(subtotalCents * GST_RATE);
+  const subtotalCents = coreCents + extras.reduce((sum, extra) => sum + extra.cents, 0);
+  const gstCents = Math.round((subtotalCents * rules.gstRateBasisPoints) / 10_000);
   return {
     distanceKm,
     baseFareCents,
     distanceCents,
     coreCents,
     minimumApplied,
+    minimumAdjustmentCents,
     extras,
     subtotalCents,
+    gstRateBasisPoints: rules.gstRateBasisPoints,
     gstCents,
     totalCents: subtotalCents + gstCents,
   };
