@@ -275,3 +275,14 @@ export const driverProfileUpdateSchema = z.object({
 export const driverAvailabilitySchema = z.object({
   availability: z.enum(["available", "off_duty"]),
 });
+
+export const driverLocationSchema = z.object({
+  bookingId: z.coerce.number().int().positive(),
+  latitude: z.number().finite().min(-90).max(90),
+  longitude: z.number().finite().min(-180).max(180),
+  timestamp: z.coerce.date(),
+  accuracyMeters: z.number().finite().min(0).max(50_000).optional(),
+  headingDegrees: z.number().finite().min(0).lt(360).optional(),
+  speedMetersPerSecond: z.number().finite().min(0).max(100).optional(),
+});
+export type DriverLocationInput = z.infer<typeof driverLocationSchema>;

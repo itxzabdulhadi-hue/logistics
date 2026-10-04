@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   date,
   doublePrecision,
   index,
@@ -183,7 +184,8 @@ export const vehicles = pgTable(
 // Bookings
 // ---------------------------------------------------------------------------
 
-export type BookingStop = { address: string; lat: number; lng: number };
+export type RoutePoint = { lat: number; lng: number };
+export type BookingStop = RoutePoint & { address: string };
 
 export const bookings = pgTable(
   "bookings",
@@ -227,6 +229,10 @@ export const bookings = pgTable(
     dropoffLng: doublePrecision("dropoff_lng"),
     additionalStops: jsonb("additional_stops")
       .$type<BookingStop[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    routeGeometry: jsonb("route_geometry")
+      .$type<RoutePoint[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
 
@@ -282,6 +288,32 @@ export const bookings = pgTable(
   ],
 );
 
+/** Latest consented driver GPS fix for an active booking; one row per booking. */
+export const bookingLiveLocations = pgTable(
+  "booking_live_locations",
+  {
+    bookingId: integer("booking_id")
+      .primaryKey()
+      .references(() => bookings.id, { onDelete: "cascade" }),
+    driverId: integer("driver_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    vehicleId: integer("vehicle_id").references(() => vehicles.id, { onDelete: "set null" }),
+    latitude: doublePrecision("latitude").notNull(),
+    longitude: doublePrecision("longitude").notNull(),
+    accuracyMeters: doublePrecision("accuracy_meters"),
+    headingDegrees: doublePrecision("heading_degrees"),
+    speedMetersPerSecond: doublePrecision("speed_meters_per_second"),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("booking_live_locations_latitude_range", sql`${t.latitude} between -90 and 90`),
+    check("booking_live_locations_longitude_range", sql`${t.longitude} between -180 and 180`),
+    index("booking_live_locations_vehicle_idx").on(t.vehicleId),
+  ],
+);
+
 export const bookingEvents = pgTable(
   "booking_events",
   {
@@ -316,6 +348,7 @@ export type Vehicle = typeof vehicles.$inferSelect;
 export type Booking = typeof bookings.$inferSelect;
 export type NewBooking = typeof bookings.$inferInsert;
 export type BookingEvent = typeof bookingEvents.$inferSelect;
+export type BookingLiveLocation = typeof bookingLiveLocations.$inferSelect;
 
 export type UserRole = (typeof userRoleEnum.enumValues)[number];
 export type UserStatus = (typeof userStatusEnum.enumValues)[number];

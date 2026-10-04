@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BookingManager } from "@/components/admin/booking-manager";
+import { LiveTrackingFeed } from "@/components/live-tracking-feed";
 import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
 import { requireRole } from "@/lib/auth";
 import { STATUS_META } from "@/lib/booking-rules";
@@ -9,6 +10,7 @@ import { formatDateTime, formatDuration, formatKm, formatMoney, titleCase } from
 import { getBookingDetail } from "@/services/bookings";
 import { listAssignableVehicles } from "@/services/fleet";
 import { listDrivers } from "@/services/users";
+import { getTrackingSnapshot } from "@/services/tracking";
 
 export const metadata: Metadata = { title: "Manage booking" };
 export const dynamic = "force-dynamic";
@@ -20,11 +22,13 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
   if (!Number.isInteger(bookingId)) notFound();
   const detail = await getBookingDetail(bookingId);
   if (!detail) notFound();
-  const [drivers, vehicles] = await Promise.all([
-    listDrivers(),
-    listAssignableVehicles({ includeVehicleId: detail.booking.vehicleId ?? undefined }),
-  ]);
   const { booking: b } = detail;
+  const trackable = b.driverId != null && ["assigned", "en_route_pickup", "picked_up", "in_transit", "delivered"].includes(b.status);
+  const [drivers, vehicles, tracking] = await Promise.all([
+    listDrivers(),
+    listAssignableVehicles({ includeVehicleId: b.vehicleId ?? undefined }),
+    trackable ? getTrackingSnapshot(b.id) : Promise.resolve(null),
+  ]);
   const directionsUrl = new URL("https://www.google.com/maps/dir/");
   directionsUrl.searchParams.set("api", "1");
   directionsUrl.searchParams.set("origin", b.pickupAddress);
@@ -77,6 +81,14 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
               ))}
             </div>
           </Card>
+
+          {tracking && (
+            <LiveTrackingFeed
+              snapshots={[tracking]}
+              title="Live vehicle tracking"
+              description="Latest GPS position, route progress and estimated delivery from the assigned driver."
+            />
+          )}
 
           <Card>
             <CardHeader title="Job details" />

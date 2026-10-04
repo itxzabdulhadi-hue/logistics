@@ -1,6 +1,7 @@
 import { errors, handle, json, parseId, parseJson } from "@/lib/api";
 import { hasPermission, requireApiUser, type SafeUser } from "@/lib/auth";
 import { bookingActionSchema } from "@/lib/validation";
+import { publishTrackingEvent } from "@/lib/tracking-realtime";
 import {
   assignBooking,
   cancelBooking,
@@ -62,5 +63,12 @@ export const PATCH = handle<{ id: string }>(async (req, { params }) => {
   }
 
   const detail = await getBookingDetail(id);
+  if (!detail) throw errors.notFound("Booking not found");
+  await publishTrackingEvent({
+    type: "tracking.booking",
+    bookingId: id,
+    status: detail.booking.status,
+    updatedAt: detail.booking.updatedAt.toISOString(),
+  });
   return json(detail);
 });

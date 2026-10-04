@@ -4,6 +4,7 @@ import type { z } from "zod";
 import { db } from "@/db";
 import {
   bookingEvents,
+  bookingLiveLocations,
   bookings,
   driverProfiles,
   users,
@@ -119,6 +120,7 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
         lat: point.lat,
         lng: point.lng,
       })),
+      routeGeometry: route.geometry,
       isAsap: input.isAsap,
       scheduledAt,
       loadDescription: input.loadDescription,
@@ -372,6 +374,9 @@ export async function transitionBooking(
     }
 
     const [updated] = await tx.update(bookings).set(patch).where(eq(bookings.id, id)).returning();
+    if (releaseVehicle) {
+      await tx.delete(bookingLiveLocations).where(eq(bookingLiveLocations.bookingId, id));
+    }
     if (releaseVehicle && b.vehicleId) {
       await tx
         .update(vehicles)
@@ -508,6 +513,9 @@ export async function assignBooking(
       : [undefined];
 
     const now = new Date();
+    if (b.driverId !== drv.id || b.vehicleId !== v.id) {
+      await tx.delete(bookingLiveLocations).where(eq(bookingLiveLocations.bookingId, id));
+    }
     const [updated] = await tx
       .update(bookings)
       .set({
@@ -601,14 +609,21 @@ export async function listDriverJobs(driverId: number) {
       scheduledAt: bookings.scheduledAt,
       isAsap: bookings.isAsap,
       pickupAddress: bookings.pickupAddress,
+      pickupLat: bookings.pickupLat,
+      pickupLng: bookings.pickupLng,
       pickupContactName: bookings.pickupContactName,
       pickupContactPhone: bookings.pickupContactPhone,
       pickupInstructions: bookings.pickupInstructions,
       dropoffAddress: bookings.dropoffAddress,
+      dropoffLat: bookings.dropoffLat,
+      dropoffLng: bookings.dropoffLng,
       dropoffContactName: bookings.dropoffContactName,
       dropoffContactPhone: bookings.dropoffContactPhone,
       dropoffInstructions: bookings.dropoffInstructions,
       additionalStops: bookings.additionalStops,
+      routeGeometry: bookings.routeGeometry,
+      locationLatitude: bookingLiveLocations.latitude,
+      locationLongitude: bookingLiveLocations.longitude,
       loadDescription: bookings.loadDescription,
       weightKg: bookings.weightKg,
       pallets: bookings.pallets,
@@ -625,6 +640,7 @@ export async function listDriverJobs(driverId: number) {
     .innerJoin(vehicleTypes, eq(vehicleTypes.id, bookings.vehicleTypeId))
     .innerJoin(customer, eq(customer.id, bookings.customerId))
     .leftJoin(vehicles, eq(vehicles.id, bookings.vehicleId))
+    .leftJoin(bookingLiveLocations, eq(bookingLiveLocations.bookingId, bookings.id))
     .where(and(eq(bookings.driverId, driverId), inArray(bookings.status, ASSIGNED_STATUSES)))
     .orderBy(asc(bookings.scheduledAt), asc(bookings.assignedAt));
 }

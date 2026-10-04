@@ -4,6 +4,7 @@ type LatLng = { lat: number; lng: number };
 type Props = {
   geometry: LatLng[];
   waypoints: LatLng[];
+  currentLocation?: LatLng | null;
   className?: string;
 };
 
@@ -27,9 +28,12 @@ function baseWorld(point: LatLng) {
   return worldAtZoom(point, 0);
 }
 
-function buildMap(geometry: LatLng[], waypoints: LatLng[]) {
-  const points = geometry.length > 1 ? geometry : waypoints;
-  if (points.length === 0) return { tiles: [] as Tile[], line: [] as PositionedPoint[], markers: [] as PositionedPoint[] };
+function buildMap(geometry: LatLng[], waypoints: LatLng[], currentLocation?: LatLng | null) {
+  const route = geometry.length > 1 ? geometry : waypoints;
+  const points = [...route, ...(currentLocation ? [currentLocation] : [])];
+  if (points.length === 0) {
+    return { tiles: [] as Tile[], line: [] as PositionedPoint[], markers: [] as PositionedPoint[], vehicle: null };
+  }
 
   const projected = points.map(baseWorld);
   const minX = Math.min(...projected.map((point) => point.x));
@@ -73,13 +77,14 @@ function buildMap(geometry: LatLng[], waypoints: LatLng[]) {
 
   return {
     tiles,
-    line: geometry.map(position),
+    line: route.map(position),
     markers: waypoints.map(position),
+    vehicle: currentLocation ? position(currentLocation) : null,
   };
 }
 
-export function RouteMap({ geometry, waypoints, className }: Props) {
-  const map = useMemo(() => buildMap(geometry, waypoints), [geometry, waypoints]);
+export function RouteMap({ geometry, waypoints, currentLocation, className }: Props) {
+  const map = useMemo(() => buildMap(geometry, waypoints, currentLocation), [geometry, waypoints, currentLocation]);
   if (map.tiles.length === 0) return null;
 
   const routePoints = map.line.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
@@ -91,7 +96,7 @@ export function RouteMap({ geometry, waypoints, className }: Props) {
         preserveAspectRatio="xMidYMid meet"
         className="h-full w-full"
         role="img"
-        aria-label="Map showing the driving route between pickup, additional stops, and delivery"
+        aria-label={map.vehicle ? "Map showing the driving route and current vehicle location" : "Map showing the driving route between pickup, additional stops, and delivery"}
       >
         <rect width={WIDTH} height={HEIGHT} fill="#eef2f3" />
         {map.tiles.map((tile) => (
@@ -114,6 +119,16 @@ export function RouteMap({ geometry, waypoints, className }: Props) {
             </g>
           );
         })}
+        {map.vehicle && (
+          <g transform={`translate(${map.vehicle.x}, ${map.vehicle.y})`} aria-label="Current vehicle location">
+            <circle r="18" fill="white" stroke="#2563eb" strokeWidth="2" />
+            <rect x="-10" y="-7" width="11" height="12" rx="2" fill="#2563eb" />
+            <path d="M1 -4h5l4 4v5H1z" fill="#2563eb" />
+            <path d="M3 -2h2.5l2 2H3z" fill="white" />
+            <circle cx="-6" cy="7" r="2" fill="#1e3a8a" />
+            <circle cx="6" cy="7" r="2" fill="#1e3a8a" />
+          </g>
+        )}
       </svg>
       <a
         href="https://www.openstreetmap.org/copyright"

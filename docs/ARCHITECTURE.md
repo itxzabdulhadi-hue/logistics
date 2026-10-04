@@ -1,4 +1,4 @@
-# Loadline — Architecture (Phases 0–3)
+# Loadline — Architecture (Phases 0–4)
 
 Loadline is an Instatruck-style on-demand truck booking SaaS: customers book a truck for a pickup → delivery job, dispatchers confirm/price/assign the job to a driver + vehicle, and drivers execute it. This document captures the Phase 0 decisions: how Instatruck works, the journeys we are modelling, the MVP cut, the stack, the system architecture, the database design, and the REST API surface.
 
@@ -22,9 +22,9 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 
 ## 2. Journeys (summary — full detail in `FEATURE_SPEC.md`)
 
-* **Customer**: register → log in → dashboard → route (pickup → stops → drop-off) → vehicle/load → itemized quote → confirmation → booking → track/cancel/manage profile.
-* **Admin / Dispatcher**: log in → dashboard → dispatch board (unassigned jobs + available people/fleet) → confirm/assign/reassign → review status progress → adjust final price/notes → complete or cancel → manage customers, driver profiles and fleet.
-* **Driver**: log in → set on/off duty → see assigned jobs → review route/load/contacts → progress status through pickup and delivery → report exceptions.
+* **Customer**: register → log in → dashboard → route (pickup → stops → drop-off) → vehicle/load → itemized quote → confirmation → booking → follow status and live vehicle tracking → cancel/manage profile.
+* **Admin / Dispatcher**: log in → dashboard → dispatch board (unassigned jobs + available people/fleet + active vehicle map) → confirm/assign/reassign → review status and GPS progress → adjust final price/notes → complete or cancel → manage customers, driver profiles and fleet.
+* **Driver**: log in → set on/off duty → see assigned jobs and route → start trip → optionally share device GPS → progress status through pickup and delivery → report exceptions.
 
 ---
 
@@ -42,15 +42,21 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 * Australian address autocomplete, route visualization, real road distance and estimated drive time.
 * Itemized price: vehicle base fare + routed distance + minimum fare adjustment + stop/service fees + ASAP surcharge + GST.
 * Admin-configurable service fees, surcharge and GST, in addition to per-vehicle tariffs.
-* Server-side route and price recalculation on booking creation; store route distance, duration and ordered stop locations.
+* Server-side route and price recalculation on booking creation; store route distance, duration, ordered stop locations and route geometry.
 
 **Phase 3 — vehicles & dispatch:**
 
-* Manage physical truck capacity, operating status, assigned driver and last-known location; manage driver profiles, licences and on/off-duty availability.
+* Manage physical truck capacity, operating status, assigned driver and dispatcher-maintained last-known label; manage driver profiles, licences and on/off-duty availability.
 * Central dispatch board for jobs missing a driver or compatible truck (including incomplete `assigned` records), available drivers and compatible fleet; atomically assign/reassign or release both resources.
 * Driver workspace for assigned routes and authorized status progression; retain the booking event log as the operational audit trail.
 
-**Deliberately deferred:** live GPS tracking, proof-of-delivery photos/signatures, card payments (Stripe), invoices/PDF, email/push notifications, ratings and marketplace auto-dispatch. Vehicle location is a dispatcher-maintained last-known label, not live telemetry.
+**Phase 4 — driver interface & live tracking:**
+
+* Drivers explicitly start/stop browser GPS sharing on an active assigned trip; each validated coordinate, device timestamp and optional accuracy/speed/heading is persisted as the booking's latest fix.
+* Customer booking details, admin booking details and the dispatch board show the route, live vehicle marker, job status, route-based ETA and delivery progress.
+* Vercel WebSockets push location/status events. Redis Pub/Sub fans events across Function instances; PostgreSQL remains the durable source of truth and reconnects reload the latest snapshot.
+
+**Deliberately deferred:** proof-of-delivery photos/signatures, card payments (Stripe), invoices/PDF, email/push notifications, ratings and marketplace auto-dispatch. Fleet's editable vehicle location remains a dispatcher-maintained label and is separate from consented trip GPS.
 
 ---
 
@@ -64,6 +70,7 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 | Auth | **JWT (HS256, `jose`)** in an `httpOnly` cookie; passwords hashed with **scrypt** (`node:crypto`) | Stateless sessions, no native deps, no third-party auth service. |
 | Validation | **zod** | Shared request schemas for API routes; detailed 422 errors. |
 | Maps & routing | Photon autocomplete/geocoding + OSRM driving routes + OpenStreetMap tiles | API-key-free route lookup, driving distance/time, and attributed route preview; replace public demo endpoints with a production provider for SLA/volume. |
+| Realtime | Vercel `experimental_upgradeWebSocket` + Redis Pub/Sub | Persistent Vercel socket connections with Redis fan-out across instances; latest GPS/status snapshots stay durable in PostgreSQL. Requires `REDIS_URL`; clients reconnect at the configured five-minute function limit. |
 | Logging | Lightweight structured JSON logger (`src/lib/logger.ts`) | Request/response + error logs; swap for pino/Datadog later. |
 
 ---
@@ -74,7 +81,7 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Browser                                                              │
 │  • Server-rendered pages (React Server Components) for reads         │
-│  • Client components call the REST API for mutations (fetch/JSON)    │
+│  • Client components use REST for mutations/snapshots and WebSockets │
 └───────────────▲──────────────────────────────┬───────────────────────┘
                 │ HTML                          │ JSON (cookie: ll_session JWT)
 ┌───────────────┴──────────────────────────────▼───────────────────────┐
@@ -84,15 +91,14 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 │  ├ (auth)   login …     ├ /api/auth/*         register/login/reset   │
 │  ├ (customer) bookings  ├ /api/bookings/*     create/list/get/patch  │
 │  │    dashboard/profile├ /api/quote          price estimate         │
-│  ├ admin/* dispatch …   ├ /api/driver/*       self-service availability│
-│  ├ driver/* my jobs    ├ /api/vehicle-types  public catalogue       │
+│  ├ admin/* dispatch …   ├ /api/driver/*       availability + GPS     │
+│  ├ driver/* my jobs    ├ /api/tracking/*     snapshots + WebSocket  │
 │  └ profile             └ /api/admin/*        stats, customers, fleet│
 │                                                                      │
-│  src/lib        auth (jwt, cookies, permissions), api (errors,       │
-│                 handler wrapper), validation (zod), booking-rules    │
-│                 (status machine, pricing, references), geocode,      │
-│                 logger, seed                                         │
-│  src/services   bookings.ts · users.ts · fleet.ts  (all DB access)   │
+│  src/lib        auth (jwt, cookies, permissions), api, validation,   │
+│                 booking rules, routing, tracking realtime, seed     │
+│  src/services   bookings · users · fleet · pricing · tracking       │
+│                 (all database access)                                │
 │  src/db         schema.ts (Drizzle) · index.ts (pool)                │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │ SQL (pg pool)
@@ -109,6 +115,7 @@ Design rules:
 * **Authorization is enforced server-side twice:** the layout for each route group redirects unauthenticated / wrong-role users, and every API handler calls `requireApiUser(permission)`. Resource availability and status edges are enforced in service transactions.
 * **Prices and routes are always recomputed server-side** from the entered addresses, current vehicle tariff and current admin rules; client distance/coordinates are never accepted as the booking price source.
 * **Every status change writes a `booking_events` row** (who, from → to, note, when); the booking row itself caches the current status and milestone timestamps for cheap querying.
+* **Realtime state is externalized:** the latest driver fix is stored in PostgreSQL, while Redis Pub/Sub relays transient WebSocket events between Vercel Function instances. WebSocket sessions are authenticated, booking subscriptions are authorized server-side, and reconnects reload durable snapshots.
 
 ---
 
@@ -120,7 +127,8 @@ Entity relationship overview:
 users 1──∞ bookings ∞──1 vehicle_types
   │            │ ∞──0..1 vehicles ∞──1 vehicle_types
   │            │ ∞──0..1 users (driver)
-  │            └─1──∞ booking_events ∞──0..1 users (actor)
+  │            ├─1──∞ booking_events ∞──0..1 users (actor)
+  │            └─1──0..1 booking_live_locations
   ├─0..1 driver_profiles
   ├─0..1 vehicles (one usual vehicle per driver)
   └─1──∞ password_reset_tokens
@@ -162,7 +170,7 @@ users 1──∞ bookings ∞──1 vehicle_types
 * identity: `reference` (unique, `LL-XXXXXX`), `customer_id`, `vehicle_type_id`, optional `vehicle_id`, `driver_id`
 * workflow: `status` (enum below), milestone timestamps (`confirmed_at`, `assigned_at`, `picked_up_at`, `delivered_at`, `completed_at`, `cancelled_at`)
 * pickup / dropoff: address, suburb, state, postcode, contact name/phone, instructions, lat/lng
-* route: ordered `additional_stops` JSONB array (`address`, `lat`, `lng`), road `distance_km`, `estimated_duration_minutes`
+* route: ordered `additional_stops` JSONB array (`address`, `lat`, `lng`), OSRM `route_geometry` JSONB, road `distance_km`, `estimated_duration_minutes`
 * schedule: `is_asap`, `scheduled_at`
 * load: `load_description`, `weight_kg`, `pallets`, `item_count`, `requires_tailgate`, `requires_hand_unload`
 * money: `quoted_price_cents`, `final_price_cents`, `currency` (AUD), `payment_method` (`card` | `account`)
@@ -171,6 +179,8 @@ users 1──∞ bookings ∞──1 vehicle_types
 Indexes on `customer_id`, `driver_id`, `status`, `scheduled_at`.
 
 **booking_events** — append-only audit/timeline: `booking_id`, `from_status`, `to_status`, `actor_id`, `actor_role`, `note`, `created_at`.
+
+**booking_live_locations** — one latest, consented GPS fix per active trip: booking/driver/vehicle IDs, latitude/longitude, optional accuracy/heading/speed, device `captured_at`, and server `received_at`. The row is deleted when the assignment is released or the trip is cancelled, failed or completed; it is not a high-volume breadcrumb history.
 
 All money is stored as **integer cents** to avoid floating point drift; distances are `double precision`.
 
@@ -238,7 +248,10 @@ Conventions: JSON in/out, cookie-based auth, `{ error: { code, message, details?
 | `GET /api/bookings` | customer / driver / staff | own bookings (customer), assigned jobs (driver) or all (staff); `status`, `q`, `page` filters |
 | `POST /api/bookings` | customer | create booking (server recomputes price) |
 | `GET /api/bookings/:id` | owner / staff | booking detail + timeline |
-| `PATCH /api/bookings/:id` | owner / assigned driver / staff | `{action:"cancel"}` (customer) · assigned driver progress · assign/reassign/unassign, status, price and notes (staff) |
+| `PATCH /api/bookings/:id` | owner / assigned driver / staff | `{action:"cancel"}` (customer) · assigned driver progress · assign/reassign/unassign, status, price and notes (staff); emits a realtime status event |
+| `POST /api/driver/location` | assigned driver | validate and persist the latest GPS fix for an active job; publish its location event |
+| `GET /api/tracking?bookingIds=…` | booking owner / assigned driver / staff | authorized batch snapshot for route, status, ETA inputs and latest GPS position |
+| `GET /api/tracking/socket` | authenticated user | Vercel WebSocket; server authorizes each booking subscription and relays Redis Pub/Sub events |
 | `GET/PATCH /api/profile` · `PUT /api/profile/password` | any | self-service profile + password |
 | `GET /api/admin/stats` | staff | dashboard KPIs |
 | `GET /api/admin/customers` · `GET/PATCH /api/admin/customers/:id` | staff | customer list / detail / suspend |
@@ -282,11 +295,11 @@ Admins configure the stop/service fees, ASAP percentage and GST at `/admin/prici
 ## 10. Repository layout
 
 ```
-docs/                      Architecture and feature spec for Phases 0–3
+docs/                      Architecture and feature spec for Phases 0–4
 src/db/schema.ts           Drizzle schema (source of truth)
-src/lib/                   auth, API helpers, validation, booking/pricing rules, routing, logger, seed
-src/services/              bookings, users, fleet and pricing data access
-src/components/            UI primitives, maps, booking wizard, admin and driver operations
+src/lib/                   auth, API helpers, validation, booking rules, routing, tracking realtime, logger, seed
+src/services/              bookings, users, fleet, pricing and tracking data access
+src/components/            UI primitives, maps, booking wizard, live tracking, admin and driver operations
 src/app/(auth)/            login, register, forgot/reset password
 src/app/(customer)/        dashboard, bookings, profile
 src/app/admin/             dashboard, dispatch, bookings, customers, vehicles, pricing, drivers

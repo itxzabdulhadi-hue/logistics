@@ -1,4 +1,4 @@
-# Loadline — Feature Specification (Phases 0–3)
+# Loadline — Feature Specification (Phases 0–4)
 
 ## 1. Personas
 
@@ -23,7 +23,7 @@
    6. Add on-site contacts, instructions and payment method, then **Confirm booking**.
    7. The server resolves the route and recalculates the price at submission; redirect to the booking detail page with the reference and status `pending`.
 4. **Booking history** — table of all bookings with status filter, free-text search (reference / address), pagination.
-5. **Booking details** — reference, status badge, route, schedule, load, driver/vehicle (once assigned), price (quoted vs final), status timeline with dispatcher notes, **Cancel booking** (allowed while `pending`, `confirmed`, `assigned`).
+5. **Booking details** — reference, status badge, route, schedule, load, driver/vehicle (once assigned), price (quoted vs final), status timeline with dispatcher notes, live vehicle map/status/progress/ETA when assigned, **Cancel booking** (allowed while `pending`, `confirmed`, `assigned`).
 6. **Profile** — update name/phone/company, change password.
 7. **Forgot password** — request a reset link, set a new password with the token.
 
@@ -32,7 +32,7 @@
 1. **Login** — staff accounts are seeded/created by an admin; staff land on `/admin`.
 2. **Dashboard** — jobs needing dispatch (pending), active jobs, jobs scheduled today, revenue this month, customers, available vehicles, status breakdown, latest bookings.
 3. **Dispatch & booking management**
-   * `/admin/dispatch` lists jobs still needing a driver/truck and shows the live available-driver and available-vehicle roster.
+   * `/admin/dispatch` lists jobs still needing a driver/truck, shows the live available-driver/vehicle roster, and maps GPS positions/status/progress for active assigned vehicles.
    * Dispatch assigns a driver and a truck of the booked class whose capacity supports the load; it confirms pending jobs and reserves both resources atomically.
    * Booking list filters by status/search; detail shows customer and route information, timeline and current assignment.
    * Actions: **Confirm**, **Assign / Reassign**, **Cancel assignment** (release driver + vehicle), progress/cancel/fail jobs, set **final price**, edit **admin notes**. Every action is written to the timeline.
@@ -43,11 +43,11 @@
    * **Drivers**: create accounts and profiles with licence details, on-duty/off-duty availability, assigned vehicle and current job.
    * Busy/suspended/off-duty drivers and allocated trucks cannot be selected for a new dispatch.
 
-## 4. Driver journey (Phase 3 — implemented)
+## 4. Driver journey (Phases 3–4 — implemented)
 
-Login → `/driver` → toggle on/off duty → see active assignments ordered by pickup time → review the route, stops, customer contacts, load and assigned truck → progress *Assigned → En route to pickup → Picked up → In transit → Delivered*. A driver can report a failed job with a required reason. Dispatch completes delivered jobs or reopens failed jobs for re-dispatch. Driver actions are restricted to bookings assigned to that driver and every transition is added to the audit timeline.
+Login → `/driver` → toggle on/off duty → see active assignments ordered by pickup time → review the mapped route, stops, customer contacts, load and assigned truck → progress *Assigned → En route to pickup → Picked up → In transit → Delivered*. On an active trip, the driver can explicitly start or stop location sharing; the browser sends GPS coordinates and a device timestamp about every 10 seconds. A driver can report a failed job with a required reason. Dispatch completes delivered jobs or reopens failed jobs for re-dispatch. Driver actions and GPS updates are restricted to that driver's current assignment; every status transition is added to the audit timeline.
 
-Live GPS, proof-of-delivery photos/signatures, push/email notifications, ratings and driver payment remain future work.
+Customer booking details and staff dispatch/detail pages show the current vehicle position, route, booking status, estimated arrival and delivery progress. WebSocket events push updates across instances via Redis Pub/Sub; PostgreSQL stores the latest fix, and clients resubscribe/reload after reconnects. Plain `next dev` uses automatic snapshot sync because Vercel's experimental WebSocket upgrade is platform-specific. Proof-of-delivery photos/signatures, push/email notifications, ratings and driver payment remain future work.
 
 ---
 
@@ -61,7 +61,7 @@ Live GPS, proof-of-delivery photos/signatures, push/email notifications, ratings
 | `en_route_pickup` | Driver travelling to pickup | staff / driver | `picked_up`, `failed`, `cancelled` |
 | `picked_up` | Load collected | staff / driver | `in_transit`, `delivered` |
 | `in_transit` | Travelling to delivery | staff / driver | `delivered`, `failed` |
-| `delivered` | Delivered, POD captured | staff / driver | `completed` |
+| `delivered` | Delivery reported; awaiting dispatch close-out (POD is not captured yet) | staff / driver | `completed` |
 | `completed` | Closed & invoiced | staff | — |
 | `cancelled` | Cancelled by customer or staff | customer / staff | — |
 | `failed` | Could not be completed (no access, refused, breakdown) | staff / driver | `confirmed` (re-dispatch) |
@@ -179,3 +179,28 @@ en_route_pickup / in_transit → failed → confirmed (dispatch reopens for re-d
 4. Reassign the job or cancel its assignment. The old resources become available and the timeline records the change.
 5. Log in as the driver and progress the assigned job through pickup and delivery. Another driver cannot view or update that job.
 6. Mark a delivered job completed from dispatch; the driver and vehicle become available. A failed job can be reopened and re-dispatched.
+
+---
+
+## 9. Phase 4 — Driver Interface & Live Tracking (implemented)
+
+### GPS and realtime behavior
+
+- [x] Persist the routed polyline on the booking so the driver, customer and staff map the same planned route.
+- [x] After starting the trip, let the driver explicitly start/stop browser geolocation. Send `{ bookingId, latitude, longitude, timestamp }` with optional accuracy, heading and speed at a throttled cadence.
+- [x] Authenticate location writes; verify that the signed-in driver still owns an `en_route_pickup`, `picked_up` or `in_transit` booking; reject invalid coordinates and stale/future timestamps.
+- [x] Keep a single latest GPS fix per booking in PostgreSQL, rather than an unbounded breadcrumb stream. Clear it when assignment is released or the job is cancelled, failed or completed.
+- [x] Show the current vehicle marker, route, booking status, route-based progress and estimated delivery on customer booking details, admin booking details and the dispatch board.
+- [x] Push GPS and booking-status events over authenticated Vercel WebSockets. Redis Pub/Sub coordinates delivery across function instances; PostgreSQL snapshots are reloaded on reconnect. Plain `next dev` falls back to periodic HTTP snapshot sync.
+- [x] Limit WebSocket subscription IDs to bookings visible to the signed-in customer, assigned driver or staff role. Check the WebSocket Origin and use the existing `httpOnly` session cookie.
+
+Vercel setup: enable Fluid Compute (default on newer projects) and configure `REDIS_URL` to a TLS-enabled Upstash Redis URL. This app sets the WebSocket function duration to five minutes and clients reconnect/resubscribe automatically. Apply schema changes with `npm run db:push` before deployment. ETA uses the booking's route-duration estimate and GPS route progress; it is not a live traffic estimate.
+
+### Phase 4 acceptance checks
+
+1. Apply the schema, log in as the demo driver and open an assigned job at `/driver`; verify the route map and pickup/delivery details.
+2. Start the trip, grant browser location permission, and start sharing. Confirm `POST /api/driver/location` accepts recent `latitude`, `longitude` and `timestamp` values and the latest fix is visible in PostgreSQL.
+3. Attempt a GPS update as another driver, for an inactive job, with invalid coordinates or with a stale timestamp; confirm it is rejected.
+4. Open the same booking as its customer and as admin/dispatcher. Confirm the marker moves, booking status and delivery progress update without a page refresh, and the map includes the planned route and ETA.
+5. Force a socket disconnect or wait for its duration limit; confirm the client reconnects, resubscribes and restores current state. Repeat after a new Vercel deployment.
+6. With `REDIS_URL` removed or under plain `next dev`, confirm tracking stays authenticated and falls back to snapshot sync instead of claiming WebSocket delivery is live.

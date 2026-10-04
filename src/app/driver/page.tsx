@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { DriverAvailabilityControl } from "@/components/driver/availability-control";
 import { DriverJobActions } from "@/components/driver/driver-job-actions";
+import { DriverLocationTracker } from "@/components/driver/driver-location-tracker";
+import { RouteMap } from "@/components/route-map";
 import { Badge, Card, CardHeader, EmptyState, PageHeader, StatusBadge } from "@/components/ui";
 import { requireRole } from "@/lib/auth";
 import { formatDateTime, formatDuration, formatKm } from "@/lib/utils";
@@ -37,6 +39,16 @@ export default async function DriverHomePage() {
             directions.searchParams.set("destination", job.dropoffAddress);
             if (job.additionalStops.length) directions.searchParams.set("waypoints", job.additionalStops.map((stop) => stop.address).join("|"));
             directions.searchParams.set("travelmode", "driving");
+            const routeWaypoints = [
+              job.pickupLat != null && job.pickupLng != null ? { lat: job.pickupLat, lng: job.pickupLng } : null,
+              ...job.additionalStops.map(({ lat, lng }) => ({ lat, lng })),
+              job.dropoffLat != null && job.dropoffLng != null ? { lat: job.dropoffLat, lng: job.dropoffLng } : null,
+            ].filter((point): point is { lat: number; lng: number } => point != null);
+            const routeGeometry = job.routeGeometry.length > 1 ? job.routeGeometry : routeWaypoints;
+            const currentLocation =
+              job.locationLatitude != null && job.locationLongitude != null
+                ? { lat: job.locationLatitude, lng: job.locationLongitude }
+                : null;
 
             return (
               <Card key={job.id}>
@@ -47,6 +59,9 @@ export default async function DriverHomePage() {
                 />
                 <div className="grid gap-6 p-5 lg:grid-cols-[1fr_280px]">
                   <div className="space-y-5">
+                    {routeGeometry.length > 0 && (
+                      <RouteMap geometry={routeGeometry} waypoints={routeWaypoints} currentLocation={currentLocation} />
+                    )}
                     <div className="grid gap-4 sm:grid-cols-2">
                       <Stop label="Pickup" address={job.pickupAddress} contact={job.pickupContactName} phone={job.pickupContactPhone} instructions={job.pickupInstructions} tone="green" />
                       {job.additionalStops.map((stop, stopIndex) => (
@@ -74,6 +89,7 @@ export default async function DriverHomePage() {
                     {job.isAsap && <Badge tone="red">Priority · ASAP</Badge>}
                   </div>
                 </div>
+                <DriverLocationTracker bookingId={job.id} status={job.status} />
                 <DriverJobActions bookingId={job.id} status={job.status} />
               </Card>
             );

@@ -2,11 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { CancelBookingButton } from "@/components/booking-actions";
+import { LiveTrackingFeed } from "@/components/live-tracking-feed";
 import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
 import { isStaff, requireUser } from "@/lib/auth";
 import { CUSTOMER_CANCELLABLE, STATUS_META } from "@/lib/booking-rules";
 import { formatDateTime, formatDuration, formatKm, formatMoney, titleCase } from "@/lib/utils";
 import { getBookingDetail } from "@/services/bookings";
+import { getTrackingSnapshot } from "@/services/tracking";
 
 export const metadata: Metadata = { title: "Booking" };
 export const dynamic = "force-dynamic";
@@ -31,6 +33,8 @@ export default async function BookingDetailPage({
   const { booking: b } = detail;
   const ownsIt = b.customerId === user.id;
   if (!ownsIt) notFound();
+  const trackable = ["assigned", "en_route_pickup", "picked_up", "in_transit", "delivered"].includes(b.status);
+  const tracking = b.driverId != null && trackable ? await getTrackingSnapshot(b.id) : null;
 
   const canCancel = b.customerId === user.id && CUSTOMER_CANCELLABLE.includes(b.status);
   const directionsUrl = new URL("https://www.google.com/maps/dir/");
@@ -80,6 +84,14 @@ export default async function BookingDetailPage({
               <Stop label="Delivery" tone="orange" address={b.dropoffAddress} contact={b.dropoffContactName} phone={b.dropoffContactPhone} instructions={b.dropoffInstructions} />
             </div>
           </Card>
+
+          {tracking && (
+            <LiveTrackingFeed
+              snapshots={[tracking]}
+              title="Live vehicle tracking"
+              description="Follow the assigned vehicle, current job status, route progress and estimated delivery."
+            />
+          )}
 
           <Card>
             <CardHeader title="Job details" />

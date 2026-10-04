@@ -1,8 +1,8 @@
 # Loadline — on-demand truck booking SaaS (Instatruck-style)
 
-Architecture and feature notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/FEATURE_SPEC.md`](docs/FEATURE_SPEC.md), covering the core platform, maps/quotation, and Phase 3 fleet and dispatch operations.
+Architecture and feature notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/FEATURE_SPEC.md`](docs/FEATURE_SPEC.md), covering the core platform, maps/quotation, fleet dispatch, and live tracking.
 
-Phase 1 delivers the booking and operations foundation; Phase 2 adds mapped routes and configurable quotes; Phase 3 adds capacity-aware fleet management, driver profiles and availability, a dispatch board, and a driver job workspace.
+Phase 1 delivers the booking and operations foundation; Phase 2 adds mapped routes and configurable quotes; Phase 3 adds capacity-aware fleet management and the driver workspace; Phase 4 adds opt-in driver GPS, live customer/admin vehicle maps, ETA/progress, and WebSocket push.
 
 ## Stack
 
@@ -18,6 +18,8 @@ npm run db:push              # creates/updates tables from src/db/schema.ts
 npm run dev                  # http://localhost:3000
 ```
 
+`REDIS_URL` is optional for local development. The Vercel WebSocket upgrade API is platform-specific; under plain `next dev`, tracking automatically falls back to authenticated snapshot sync. Configure Upstash Redis and use Vercel (or its local runtime) to exercise cross-instance WebSocket delivery.
+
 Maps use Photon, OSRM and OpenStreetMap tiles without a Google API key; booking and admin pages also provide Google Maps directions links. The public map/geocoding/routing endpoints are best-effort demo providers, so use a contracted or self-hosted provider for production traffic.
 
 ## Deploy on Vercel
@@ -32,12 +34,13 @@ Before the first deployment, add these environment variables in **Vercel → Pro
 | `AUTH_SECRET` | Yes in production | Generate a strong value with `openssl rand -base64 32`. Use a different secret for Production and Preview. |
 | `LOG_LEVEL` | No | Optional logger setting, e.g. `info`. |
 | `PG_POOL_MAX` | No | Defaults to `1` connection per serverless instance; raise only if your database connection budget allows it. |
+| `REDIS_URL` | Required for WebSocket fan-out | Upstash Redis TLS connection URL. Add Upstash from the Vercel Marketplace (or provide a compatible Redis URL) so GPS/status events reach sockets on other Function instances. |
 
 Set the variables for the appropriate Vercel environments (Production and Preview); keep local values in `.env`. The production app rejects missing or too-short `AUTH_SECRET` values rather than using the development fallback. Do not set `COOKIE_SECURE=false` on Vercel.
 
 Run `npm run db:push` once from a trusted machine or CI shell with the **target database's** `DATABASE_URL` set, before serving the deployment. Schema updates are intentionally not run during Vercel builds. Confirm the database accepts connections from Vercel and set the Vercel Function Region near the database (for example, `syd1` for a Sydney-hosted database); this repo leaves the region unset to avoid pinning functions far from your database.
 
-Demo data (admin, dispatcher, customers, drivers, vehicle classes, fleet, sample jobs) is seeded automatically the first time the app talks to an empty database (via `/api/health`, the landing page, or login). Drivers land on the `/driver` workspace; location labels in Fleet are dispatcher-maintained last-known locations, not live GPS tracking.
+Demo data (admin, dispatcher, customers, drivers, vehicle classes, fleet, sample jobs) is seeded automatically the first time the app talks to an empty database (via `/api/health`, the landing page, or login). Drivers land on `/driver`; GPS sharing is opt-in per active trip and can be stopped by the driver at any time.
 
 ### Demo accounts
 
@@ -84,21 +87,40 @@ pending → confirmed (dispatch may assign directly) → assigned → en route t
 assigned → confirmed (cancel assignment / release resources)
 ```
 
-Vehicle location is an editable last-known label; live GPS tracking, proof-of-delivery capture, notifications, payments and invoice generation remain future work.
+Fleet's editable vehicle location remains a dispatcher-maintained label; trip GPS is stored separately as the latest booking location.
+
+## Phase 4 — Driver interface & real-time tracking
+
+- Drivers see an assigned job, pickup/drop-off contacts, mapped route, and next status actions in `/driver`. After starting the trip, they can explicitly start or stop browser GPS sharing; each update includes `latitude`, `longitude`, and the device `timestamp` (plus optional accuracy/speed/heading).
+- The authenticated `/api/driver/location` endpoint accepts fixes only from the currently assigned driver on an active trip, validates coordinate ranges and freshness, and persists one latest location per booking. GPS is cleared on unassignment or when the job is closed/cancelled/failed.
+- Customer booking detail, admin booking detail, and `/admin/dispatch` show the route, last vehicle position, status, progress, and an ETA derived from the booked route estimate. A stale-fix label makes pauses or signal loss visible.
+- Vercel's WebSocket upgrade API pushes GPS and booking-status events. Upstash Redis Pub/Sub fans events across Function instances; PostgreSQL remains the durable source of truth. Clients resubscribe and reload state after reconnects/function duration limits. Without Vercel WebSockets (such as plain `next dev`) the UI keeps itself current with authenticated snapshot sync instead.
+- For production on Vercel, set `REDIS_URL` to a TLS-enabled Upstash Redis URL. WebSocket support is currently a Vercel beta and each connection is capped at five minutes by this app configuration; reconnect is automatic. ETA is route-based, not a live traffic guarantee.
+
+### Job lifecycle
+
+```text
+pending → confirmed (dispatch may assign directly) → assigned → en route to pickup → picked up → in transit → delivered → completed
+   └───────────┴───────────┴────────────────────┴────────→ cancelled (dispatch; customer cancellation ends before en route)
+                                     en route / in transit → failed → confirmed (re-dispatch)
+assigned → confirmed (cancel assignment / release resources)
+```
+
+Proof-of-delivery capture, notifications, payments and invoice generation remain future work.
 
 ## Project layout
 
 ```
-docs/                 Phase 0 architecture + feature spec
-src/db/schema.ts      Drizzle schema (users, driver_profiles, fleet, pricing_rules, bookings, booking_events)
-src/lib/              auth · api helpers · validation · booking-rules · route geocoding · logger · seed
-src/services/         bookings · users · fleet · pricing (all database access)
-src/components/       UI primitives, app shell, maps, booking wizard, admin and driver operations
+docs/                 Architecture + feature spec for Phases 0–4
+src/db/schema.ts      Drizzle schema (users, driver_profiles, vehicle_types, vehicles, pricing_rules, bookings, booking_events, booking_live_locations)
+src/lib/              auth · api helpers · validation · booking-rules · route geocoding · tracking realtime · logger · seed
+src/services/         bookings · users · fleet · pricing · tracking (all database access)
+src/components/       UI primitives, app shell, maps, booking wizard, live tracking, admin and driver operations
 src/app/(auth)        login · register · forgot-password · reset-password
 src/app/(customer)    dashboard · bookings · bookings/new · bookings/[id] · profile
 src/app/admin         dashboard · dispatch · bookings · customers · vehicles · pricing · drivers
 src/app/driver        active assignment board + job progress
-src/app/api           REST API route handlers
+src/app/api           REST APIs for bookings, GPS, tracking snapshots and WebSockets
 ```
 
 ## Validation
