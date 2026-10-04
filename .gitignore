@@ -9,6 +9,7 @@ node_modules/
 .env.production.local
 
 # Build output
+*.tsbuildinfo
 dist/
 build/
 .next/

@@ -2,13 +2,16 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BookingManager } from "@/components/admin/booking-manager";
+import { LiveTrackingFeed } from "@/components/live-tracking-feed";
+import { RouteMap } from "@/components/route-map";
 import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
 import { requireRole } from "@/lib/auth";
 import { STATUS_META } from "@/lib/booking-rules";
-import { formatDateTime, formatKm, formatMoney, titleCase } from "@/lib/utils";
+import { formatDateTime, formatDuration, formatKm, formatMoney, titleCase } from "@/lib/utils";
 import { getBookingDetail } from "@/services/bookings";
 import { listAssignableVehicles } from "@/services/fleet";
 import { listDrivers } from "@/services/users";
+import { getTrackingSnapshot } from "@/services/tracking";
 
 export const metadata: Metadata = { title: "Manage booking" };
 export const dynamic = "force-dynamic";
@@ -18,9 +21,29 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
   const { id } = await params;
   const bookingId = Number(id);
   if (!Number.isInteger(bookingId)) notFound();
-  const [detail, drivers, vehicles] = await Promise.all([getBookingDetail(bookingId), listDrivers(), listAssignableVehicles()]);
+  const detail = await getBookingDetail(bookingId);
   if (!detail) notFound();
   const { booking: b } = detail;
+  const trackable = b.driverId != null && ["assigned", "en_route_pickup", "picked_up", "in_transit", "delivered"].includes(b.status);
+  const [drivers, vehicles, tracking] = await Promise.all([
+    listDrivers(),
+    listAssignableVehicles({ includeVehicleId: b.vehicleId ?? undefined }),
+    trackable ? getTrackingSnapshot(b.id) : Promise.resolve(null),
+  ]);
+  const directionsUrl = new URL("https://www.google.com/maps/dir/");
+  directionsUrl.searchParams.set("api", "1");
+  directionsUrl.searchParams.set("origin", b.pickupAddress);
+  directionsUrl.searchParams.set("destination", b.dropoffAddress);
+  if (b.additionalStops?.length) {
+    directionsUrl.searchParams.set("waypoints", b.additionalStops.map((stop) => stop.address).join("|"));
+  }
+  directionsUrl.searchParams.set("travelmode", "driving");
+  const routeWaypoints = [
+    b.pickupLat != null && b.pickupLng != null ? { lat: b.pickupLat, lng: b.pickupLng } : null,
+    ...(b.additionalStops ?? []).map(({ lat, lng }) => ({ lat, lng })),
+    b.dropoffLat != null && b.dropoffLng != null ? { lat: b.dropoffLat, lng: b.dropoffLng } : null,
+  ].filter((point): point is { lat: number; lng: number } => point != null);
+  const routeGeometry = b.routeGeometry.length > 1 ? b.routeGeometry : routeWaypoints;
 
   return (
     <>
@@ -46,10 +69,16 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
           </Card>
 
           <Card>
-            <CardHeader title="Route" />
+            <CardHeader
+              title="Route"
+              description={b.routeOptimized ? "Intermediate stops reordered to shorten the route; pickup and final delivery stay fixed." : "Stops will be visited in the entered order."}
+              action={<a href={directionsUrl.toString()} target="_blank" rel="noreferrer" className="text-xs font-semibold text-orange-700 hover:text-orange-800">Open in Google Maps ↗</a>}
+            />
+            {!tracking && routeGeometry.length > 1 && <div className="px-5 pt-4"><RouteMap geometry={routeGeometry} waypoints={routeWaypoints} /></div>}
             <div className="grid gap-6 p-5 md:grid-cols-2">
               {[
                 { label: "Pickup", dot: "bg-emerald-500", address: b.pickupAddress, contact: b.pickupContactName, phone: b.pickupContactPhone, instructions: b.pickupInstructions },
+                ...(b.additionalStops ?? []).map((stop, index) => ({ label: `Stop ${index + 1}`, dot: "bg-slate-500", address: stop.address, contact: null, phone: null, instructions: null })),
                 { label: "Delivery", dot: "bg-orange-500", address: b.dropoffAddress, contact: b.dropoffContactName, phone: b.dropoffContactPhone, instructions: b.dropoffInstructions },
               ].map((s) => (
                 <div key={s.label}>
@@ -62,12 +91,21 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
             </div>
           </Card>
 
+          {tracking && (
+            <LiveTrackingFeed
+              snapshots={[tracking]}
+              title="Live vehicle tracking"
+              description="Latest GPS position, route progress and estimated delivery from the assigned driver."
+            />
+          )}
+
           <Card>
             <CardHeader title="Job details" />
             <div className="p-5">
               <DescriptionList columns={3} items={[
                 { label: "Pickup time", value: <>{formatDateTime(b.scheduledAt)}{b.isAsap && <span className="ml-1 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-700">ASAP</span>}</> },
-                { label: "Distance", value: formatKm(b.distanceKm) },
+                { label: "Road distance", value: formatKm(b.distanceKm) },
+                { label: "Estimated drive", value: b.estimatedDurationMinutes != null ? formatDuration(b.estimatedDurationMinutes * 60) : "—" },
                 { label: "Booked", value: formatDateTime(b.createdAt) },
                 { label: "Load", value: b.loadDescription },
                 { label: "Weight / pallets / items", value: `${b.weightKg ? `${b.weightKg.toLocaleString()} kg` : "—"} · ${b.pallets} pallets · ${b.itemCount ?? "—"} items` },
@@ -92,8 +130,8 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
 
         <div>
           <BookingManager
-            booking={{ id: b.id, status: b.status, driverId: b.driverId, vehicleId: b.vehicleId, vehicleTypeId: b.vehicleTypeId, quotedPriceCents: b.quotedPriceCents, finalPriceCents: b.finalPriceCents, adminNotes: b.adminNotes }}
-            drivers={drivers.map((d) => ({ id: d.id, name: d.name, vehicleId: d.vehicleId, vehicleRegistration: d.vehicleRegistration, activeJobs: d.activeJobs, status: d.status }))}
+            booking={{ id: b.id, status: b.status, driverId: b.driverId, vehicleId: b.vehicleId, vehicleTypeId: b.vehicleTypeId, weightKg: b.weightKg, pallets: b.pallets, quotedPriceCents: b.quotedPriceCents, finalPriceCents: b.finalPriceCents, adminNotes: b.adminNotes }}
+            drivers={drivers.map((d) => ({ id: d.id, name: d.name, vehicleId: d.vehicleId, vehicleRegistration: d.vehicleRegistration, activeJobs: d.activeJobs, status: d.status, availability: d.availability, dispatchStatus: d.dispatchStatus, currentJob: d.currentJob }))}
             vehicles={vehicles}
           />
         </div>

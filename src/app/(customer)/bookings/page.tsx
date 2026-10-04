@@ -17,13 +17,14 @@ export default async function BookingsPage({
 }) {
   const user = await requireUser();
   if (isStaff(user.role)) redirect("/admin/bookings");
+  if (user.role === "driver") redirect("/driver");
   const sp = await searchParams;
   const status = BOOKING_STATUSES.includes(sp.status as BookingStatus) ? (sp.status as BookingStatus) : undefined;
   const page = Math.max(1, Number(sp.page) || 1);
   const q = sp.q?.trim() || undefined;
 
   const result = await listBookings({
-    ...(user.role === "driver" ? { driverId: user.id } : { customerId: user.id }),
+    customerId: user.id,
     status,
     q,
     page,

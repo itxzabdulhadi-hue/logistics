@@ -1,8 +1,12 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
+  date,
   doublePrecision,
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   serial,
@@ -22,6 +26,8 @@ export const userRoleEnum = pgEnum("user_role", [
 ]);
 
 export const userStatusEnum = pgEnum("user_status", ["active", "suspended"]);
+
+export const driverAvailabilityEnum = pgEnum("driver_availability", ["available", "off_duty"]);
 
 export const vehicleStatusEnum = pgEnum("vehicle_status", [
   "available",
@@ -71,6 +77,24 @@ export const users = pgTable(
   (t) => [index("users_role_idx").on(t.role)],
 );
 
+/** Driver-specific operating profile; account status remains on users. */
+export const driverProfiles = pgTable(
+  "driver_profiles",
+  {
+    driverId: integer("driver_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    availability: driverAvailabilityEnum("availability").notNull().default("available"),
+    licenseNumber: text("license_number"),
+    licenseClass: text("license_class"),
+    licenseExpiryDate: date("license_expiry_date", { mode: "string" }),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("driver_profiles_availability_idx").on(t.availability)],
+);
+
 export const passwordResetTokens = pgTable(
   "password_reset_tokens",
   {
@@ -113,6 +137,17 @@ export const vehicleTypes = pgTable("vehicle_types", {
     .defaultNow(),
 });
 
+/** Singleton, administrator-managed rates used by every new quote. Percentages use basis points. */
+export const pricingRules = pgTable("pricing_rules", {
+  id: integer("id").primaryKey().default(1),
+  additionalStopFeeCents: integer("additional_stop_fee_cents").notNull().default(1500),
+  tailgateFeeCents: integer("tailgate_fee_cents").notNull().default(2500),
+  handUnloadFeeCents: integer("hand_unload_fee_cents").notNull().default(4500),
+  asapSurchargeBasisPoints: integer("asap_surcharge_basis_points").notNull().default(1500),
+  gstRateBasisPoints: integer("gst_rate_basis_points").notNull().default(1000),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const vehicles = pgTable(
   "vehicles",
   {
@@ -126,6 +161,8 @@ export const vehicles = pgTable(
     year: integer("year"),
     capacityKg: integer("capacity_kg"),
     status: vehicleStatusEnum("status").notNull().default("available"),
+    currentLocation: text("current_location"),
+    locationUpdatedAt: timestamp("location_updated_at", { withTimezone: true }),
     driverId: integer("driver_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -146,6 +183,15 @@ export const vehicles = pgTable(
 // ---------------------------------------------------------------------------
 // Bookings
 // ---------------------------------------------------------------------------
+
+export type RoutePoint = { lat: number; lng: number };
+export type BookingStopStatus = "pending" | "arrived" | "completed";
+export type BookingStop = RoutePoint & {
+  address: string;
+  status?: BookingStopStatus;
+  arrivedAt?: string | null;
+  completedAt?: string | null;
+};
 
 export const bookings = pgTable(
   "bookings",
@@ -187,6 +233,15 @@ export const bookings = pgTable(
     dropoffInstructions: text("dropoff_instructions"),
     dropoffLat: doublePrecision("dropoff_lat"),
     dropoffLng: doublePrecision("dropoff_lng"),
+    additionalStops: jsonb("additional_stops")
+      .$type<BookingStop[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    routeGeometry: jsonb("route_geometry")
+      .$type<RoutePoint[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    routeOptimized: boolean("route_optimized").notNull().default(false),
 
     // Schedule
     isAsap: boolean("is_asap").notNull().default(false),
@@ -204,6 +259,7 @@ export const bookings = pgTable(
 
     // Money
     distanceKm: doublePrecision("distance_km"),
+    estimatedDurationMinutes: integer("estimated_duration_minutes"),
     quotedPriceCents: integer("quoted_price_cents").notNull(),
     finalPriceCents: integer("final_price_cents"),
     currency: text("currency").notNull().default("AUD"),
@@ -239,6 +295,32 @@ export const bookings = pgTable(
   ],
 );
 
+/** Latest consented driver GPS fix for an active booking; one row per booking. */
+export const bookingLiveLocations = pgTable(
+  "booking_live_locations",
+  {
+    bookingId: integer("booking_id")
+      .primaryKey()
+      .references(() => bookings.id, { onDelete: "cascade" }),
+    driverId: integer("driver_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    vehicleId: integer("vehicle_id").references(() => vehicles.id, { onDelete: "set null" }),
+    latitude: doublePrecision("latitude").notNull(),
+    longitude: doublePrecision("longitude").notNull(),
+    accuracyMeters: doublePrecision("accuracy_meters"),
+    headingDegrees: doublePrecision("heading_degrees"),
+    speedMetersPerSecond: doublePrecision("speed_meters_per_second"),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("booking_live_locations_latitude_range", sql`${t.latitude} between -90 and 90`),
+    check("booking_live_locations_longitude_range", sql`${t.longitude} between -180 and 180`),
+    index("booking_live_locations_vehicle_idx").on(t.vehicleId),
+  ],
+);
+
 export const bookingEvents = pgTable(
   "booking_events",
   {
@@ -267,10 +349,13 @@ export const bookingEvents = pgTable(
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type VehicleType = typeof vehicleTypes.$inferSelect;
+export type DriverProfile = typeof driverProfiles.$inferSelect;
+export type DriverAvailability = (typeof driverAvailabilityEnum.enumValues)[number];
 export type Vehicle = typeof vehicles.$inferSelect;
 export type Booking = typeof bookings.$inferSelect;
 export type NewBooking = typeof bookings.$inferInsert;
 export type BookingEvent = typeof bookingEvents.$inferSelect;
+export type BookingLiveLocation = typeof bookingLiveLocations.$inferSelect;
 
 export type UserRole = (typeof userRoleEnum.enumValues)[number];
 export type UserStatus = (typeof userStatusEnum.enumValues)[number];

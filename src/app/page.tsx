@@ -9,7 +9,7 @@ import { listVehicleTypes } from "@/services/fleet";
 export const dynamic = "force-dynamic";
 
 const STEPS = [
-  { title: "Tell us what you're moving", body: "Pick a vehicle class, enter pickup and delivery addresses, and describe the load. Get an instant, itemised price." },
+  { title: "Map the route, choose a truck", body: "Enter pickup and delivery addresses with autocomplete, add any stops, see the driving route and estimated time, then choose a vehicle and get an itemized price." },
   { title: "We dispatch the right truck", body: "Our dispatch team confirms your job and allocates a vetted driver and vehicle — ASAP or at your scheduled time." },
   { title: "Track it to the door", body: "Follow every status change from confirmation to delivery in your booking timeline, with notes from dispatch." },
 ];
@@ -28,7 +28,7 @@ export default async function HomePage() {
           <nav className="flex items-center gap-3">
             {user ? (
               <LinkButton href={homeForRole(user.role)} size="sm">
-                Go to {user.role === "admin" || user.role === "dispatcher" ? "dispatch console" : "dashboard"}
+                Go to {user.role === "admin" || user.role === "dispatcher" ? "dispatch console" : user.role === "driver" ? "driver workspace" : "dashboard"}
               </LinkButton>
             ) : (
               <>
@@ -85,6 +85,7 @@ export default async function HomePage() {
                 ["Customer", "customer@loadline.demo", "Customer123!"],
                 ["Dispatcher", "dispatch@loadline.demo", "Dispatch123!"],
                 ["Admin", "admin@loadline.demo", "Admin123!"],
+                ["Driver", "driver@loadline.demo", "Driver123!"],
               ].map(([role, email, pw]) => (
                 <li key={role} className="flex items-center justify-between gap-4 rounded-xl bg-slate-800/60 px-4 py-3">
                   <span className="font-semibold text-white">{role}</span>
@@ -121,7 +122,7 @@ export default async function HomePage() {
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
               <h2 className="text-3xl font-bold tracking-tight text-slate-900">Pick the right vehicle</h2>
-              <p className="mt-2 text-slate-600">Transparent tariffs: base fare + per-kilometre rate + extras. GST included at checkout.</p>
+              <p className="mt-2 text-slate-600">Transparent quotes from your routed distance, vehicle class, stops and services. GST included at checkout.</p>
             </div>
           </div>
           <div className="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
@@ -156,7 +157,7 @@ export default async function HomePage() {
       <footer className="border-t border-slate-200 py-10">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 text-sm text-slate-500">
           <Brand dark={false} />
-          <p>Phase 1 MVP · Customer booking + dispatch console. Driver app coming in Phase 2.</p>
+          <p>Route-based quotes, capacity-aware dispatch and a driver workspace to keep jobs moving.</p>
         </div>
       </footer>
     </div>

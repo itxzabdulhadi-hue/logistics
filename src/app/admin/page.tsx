@@ -25,7 +25,7 @@ export default async function AdminDashboardPage() {
         eyebrow="Dispatch console"
         title={`Welcome back, ${user.name.split(" ")[0]}`}
         description="Operational overview across all customers, jobs and fleet."
-        actions={<LinkButton href="/admin/bookings?status=pending" variant="dark">Review pending jobs</LinkButton>}
+        actions={<LinkButton href="/admin/dispatch" variant="dark">Open dispatch board</LinkButton>}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -37,7 +37,7 @@ export default async function AdminDashboardPage() {
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_320px]">
         <Card>
-          <CardHeader title="Needs attention" description="Pending jobs and confirmed/assigned jobs past their pickup time." action={<Link href="/admin/bookings?status=pending" className="text-sm font-medium text-orange-600 hover:text-orange-700">All pending →</Link>} />
+          <CardHeader title="Needs attention" description="Pending jobs and confirmed/assigned jobs past their pickup time." action={<Link href="/admin/dispatch" className="text-sm font-medium text-orange-600 hover:text-orange-700">Dispatch board →</Link>} />
           {attention.length === 0 ? (
             <EmptyState title="All clear" description="No jobs waiting on dispatch right now." />
           ) : (

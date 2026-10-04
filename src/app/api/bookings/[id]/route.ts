@@ -1,12 +1,14 @@
 import { errors, handle, json, parseId, parseJson } from "@/lib/api";
 import { hasPermission, requireApiUser, type SafeUser } from "@/lib/auth";
 import { bookingActionSchema } from "@/lib/validation";
+import { publishTrackingEvent } from "@/lib/tracking-realtime";
 import {
   assignBooking,
   cancelBooking,
   getBookingDetail,
   transitionBooking,
   updateBookingAdmin,
+  updateBookingStopStatus,
   type BookingDetail,
 } from "@/services/bookings";
 
@@ -37,6 +39,15 @@ export const PATCH = handle<{ id: string }>(async (req, { params }) => {
   if (action.action === "cancel") {
     if (!staff && !hasPermission(user.role, "bookings:cancel:own")) throw errors.forbidden();
     await cancelBooking(id, user, action.reason, !staff);
+  } else if (user.role === "driver") {
+    if (!hasPermission(user.role, "bookings:progress")) throw errors.forbidden();
+    if (action.action === "stop") {
+      await updateBookingStopStatus(id, action.stopIndex, action.status, user);
+    } else if (action.action === "transition") {
+      await transitionBooking(id, action.status, user, action.note, { driverId: user.id });
+    } else {
+      throw errors.forbidden();
+    }
   } else {
     if (!staff) throw errors.forbidden();
     switch (action.action) {
@@ -48,7 +59,7 @@ export const PATCH = handle<{ id: string }>(async (req, { params }) => {
         await assignBooking(id, { driverId: action.driverId, vehicleId: action.vehicleId }, user, action.note);
         break;
       case "unassign":
-        await transitionBooking(id, "confirmed", user, action.note ?? "Driver unassigned");
+        await transitionBooking(id, "confirmed", user, action.note ?? "Assignment cancelled; job returned to confirmed");
         break;
       case "update":
         await updateBookingAdmin(id, { finalPriceCents: action.finalPriceCents, adminNotes: action.adminNotes }, user);
@@ -57,5 +68,12 @@ export const PATCH = handle<{ id: string }>(async (req, { params }) => {
   }
 
   const detail = await getBookingDetail(id);
+  if (!detail) throw errors.notFound("Booking not found");
+  await publishTrackingEvent({
+    type: "tracking.booking",
+    bookingId: id,
+    status: detail.booking.status,
+    updatedAt: detail.booking.updatedAt.toISOString(),
+  });
   return json(detail);
 });
