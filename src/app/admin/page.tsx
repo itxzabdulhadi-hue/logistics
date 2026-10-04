@@ -31,7 +31,7 @@ export default async function AdminDashboardPage() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Needs dispatch" value={stats.jobs.pending} tone="amber" hint="Pending customer bookings" />
         <StatCard label="Active jobs" value={stats.jobs.active} tone="orange" hint={`${stats.jobs.today} scheduled today`} />
-        <StatCard label="Revenue this month" value={formatMoney(stats.jobs.revenueMonthCents)} tone="green" hint={`${stats.jobs.completedMonth} completed · ${formatMoney(stats.jobs.pipelineCents)} in pipeline`} />
+        <StatCard label="Delivered & completed value" value={formatMoney(stats.jobs.revenueMonthCents)} tone="green" hint={`${stats.jobs.completedMonth} closed · ${formatMoney(stats.jobs.pipelineCents)} in pipeline`} />
         <StatCard label="Fleet" value={`${stats.fleet.available}/${stats.fleet.total}`} tone="blue" hint={`vehicles available · ${stats.people.drivers} active drivers · ${stats.people.customers} customers`} />
       </div>
 

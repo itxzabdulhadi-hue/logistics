@@ -1,12 +1,12 @@
 # Loadline — on-demand truck booking SaaS (Instatruck-style)
 
-Architecture and feature notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/FEATURE_SPEC.md`](docs/FEATURE_SPEC.md), covering the core platform, maps/quotation, fleet dispatch, and live tracking.
+Architecture and feature notes live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/FEATURE_SPEC.md`](docs/FEATURE_SPEC.md), covering the core platform, maps/quotation, fleet dispatch, live tracking, multi-stop journeys, and payments/invoicing.
 
-Phase 1 delivers the booking and operations foundation; Phase 2 adds mapped routes and configurable quotes; Phase 3 adds capacity-aware fleet management and the driver workspace; Phase 4 adds opt-in driver GPS, live maps and WebSocket updates; Phase 5 adds ordered multi-stop journeys, lightweight stop optimization, driver stop progress and per-stop ETAs.
+Phase 1 delivers the booking and operations foundation; Phase 2 adds mapped routes and configurable quotes; Phase 3 adds capacity-aware fleet management and the driver workspace; Phase 4 adds opt-in driver GPS, live maps and WebSocket updates; Phase 5 adds ordered multi-stop journeys, lightweight stop optimization, driver stop progress and per-stop ETAs; Phase 6 adds invoice generation, hosted card checkout, payment/refund history and finance reconciliation.
 
 ## Stack
 
-Next.js 16 (App Router, RSC + route handlers) · React 19 · TypeScript · PostgreSQL · Drizzle ORM · Tailwind CSS v4 · zod · jose (JWT) · scrypt password hashing
+Next.js 16 (App Router, RSC + route handlers) · React 19 · TypeScript · PostgreSQL · Drizzle ORM · Stripe Checkout · Tailwind CSS v4 · zod · jose (JWT) · scrypt password hashing
 
 ## Run locally
 
@@ -35,8 +35,13 @@ Before the first deployment, add these environment variables in **Vercel → Pro
 | `LOG_LEVEL` | No | Optional logger setting, e.g. `info`. |
 | `PG_POOL_MAX` | No | Defaults to `1` connection per serverless instance; raise only if your database connection budget allows it. |
 | `REDIS_URL` | Required for WebSocket fan-out | Upstash Redis TLS connection URL. Add Upstash from the Vercel Marketplace (or provide a compatible Redis URL) so GPS/status events reach sockets on other Function instances. |
+| `STRIPE_SECRET_KEY` | Required for card checkout | Stripe secret API key (`sk_test_...` in test mode; use a restricted live key in Production). Keep it server-side only. |
+| `STRIPE_WEBHOOK_SECRET` | Required for payment confirmation | Signing secret (`whsec_...`) for the Stripe webhook endpoint `https://<your-domain>/api/payments/webhook`. Configure the same secret for each Vercel environment. |
+| `APP_URL` | Recommended in production | Canonical public origin, e.g. `https://haulage.example`; used for safe Stripe success/cancel return URLs. Vercel's deployment URL is a fallback for preview deployments. |
 
 Set the variables for the appropriate Vercel environments (Production and Preview); keep local values in `.env`. The production app rejects missing or too-short `AUTH_SECRET` values rather than using the development fallback. Do not set `COOKIE_SECURE=false` on Vercel.
+
+In Stripe, register `POST /api/payments/webhook` and enable `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `refund.created`, `refund.updated`, and `refund.failed`. The endpoint verifies Stripe's signature and deduplicates event IDs; return/refresh URLs do not mark an invoice paid. Use Stripe test mode and test cards in Preview before enabling live payments.
 
 Run `npm run db:push` once from a trusted machine or CI shell with the **target database's** `DATABASE_URL` set, before serving the deployment. Schema updates are intentionally not run during Vercel builds. Confirm the database accepts connections from Vercel and set the Vercel Function Region near the database (for example, `syd1` for a Sydney-hosted database); this repo leaves the region unset to avoid pinning functions far from your database.
 
@@ -106,7 +111,7 @@ pending → confirmed (dispatch may assign directly) → assigned → en route t
 assigned → confirmed (cancel assignment / release resources)
 ```
 
-Proof-of-delivery capture, notifications, payments and invoice generation remain future work.
+Proof-of-delivery capture, customer/driver notifications, ratings and marketplace auto-dispatch remain future work. Phase 6 below covers payment and invoicing.
 
 ## Phase 5 — Multi-stop & smarter routing
 
@@ -117,17 +122,27 @@ Proof-of-delivery capture, notifications, payments and invoice generation remain
 
 Run `npm run db:push` against the target database to add the route optimization flag. Stop state reuses the existing JSONB `additional_stops` data.
 
+## Phase 6 — Payments, invoices & finance
+
+- Booking quote line items and GST are snapshotted at creation. When dispatch completes a job, the app issues one immutable, numbered invoice from the final price and customer, booking, vehicle and route details; a unique booking constraint and transactional invoice-number sequence prevent duplicates.
+- Card invoices use Stripe-hosted Checkout. The customer can retry failed checkout from the booking page. Only signed, idempotently processed Stripe webhooks update payment/refund state; redirect pages are informational, not proof of payment.
+- Customers see their invoice, itemized charges, tax, payment status and transaction/refund history. On-account invoices remain outstanding until an admin records a bank payment and optional reference.
+- Admins and dispatchers have read-only finance access to monthly net revenue, collected payments, refunds, outstanding balances, recent payment attempts and failed attempts. Admins can issue Stripe refunds or reconcile account payments; refund and manual-payment actions are audited.
+- Configure `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and (in production) `APP_URL` as described above. Without Stripe credentials, invoices and account reconciliation remain available; card checkout is visibly disabled.
+
+Run `npm run db:push` against the target database to add the invoice/payment tables and booking quote snapshots (along with any remaining earlier schema changes). Back up production data and review the schema diff before applying it.
+
 ## Project layout
 
 ```
-docs/                 Architecture + feature spec for Phases 0–4
-src/db/schema.ts      Drizzle schema (users, driver_profiles, vehicle_types, vehicles, pricing_rules, bookings, booking_events, booking_live_locations)
-src/lib/              auth · api helpers · validation · booking-rules · route geocoding · tracking realtime · logger · seed
-src/services/         bookings · users · fleet · pricing · tracking (all database access)
-src/components/       UI primitives, app shell, maps, booking wizard, live tracking, admin and driver operations
+docs/                 Architecture + feature spec for Phases 0–6
+src/db/schema.ts      Drizzle schema (accounts, fleet, bookings, invoices, payments, refunds, webhook ledger)
+src/lib/              auth · API helpers · validation · booking rules · routing · invoices · realtime · logger · seed
+src/services/         bookings · users · fleet · pricing · tracking · billing (database access)
+src/components/       UI primitives, app shell, maps, booking wizard, live tracking, payments, admin and driver operations
 src/app/(auth)        login · register · forgot-password · reset-password
 src/app/(customer)    dashboard · bookings · bookings/new · bookings/[id] · profile
-src/app/admin         dashboard · dispatch · bookings · customers · vehicles · pricing · drivers
+src/app/admin         dashboard · dispatch · bookings · finance · customers · vehicles · pricing · drivers
 src/app/driver        active assignment board + job progress
 src/app/api           REST APIs for bookings, GPS, tracking snapshots and WebSockets
 ```

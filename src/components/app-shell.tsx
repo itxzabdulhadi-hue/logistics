@@ -23,6 +23,7 @@ const ICONS = {
   wheel: icon("M12 22a10 10 0 100-20 10 10 0 000 20zM12 15a3 3 0 100-6 3 3 0 000 6zM12 2v7M4.2 17l6.1-3.5M19.8 17l-6.1-3.5"),
   chart: icon("M3 3v18h18M7 15l4-4 4 4 5-6"),
   sliders: icon("M4 21v-7m0-4V3m8 18v-9m0-4V3m8 18v-5m0-4V3M2 14h4m4-4h4m4 6h4"),
+  receipt: icon("M5 3h14v18l-3-2-3 2-3-2-3 2-2-2zM8 8h8M8 12h8M8 16h4"),
 };
 
 const CUSTOMER_NAV: NavItem[] = [
@@ -35,6 +36,7 @@ const STAFF_NAV: NavItem[] = [
   { href: "/admin", label: "Dashboard", icon: ICONS.chart, exact: true },
   { href: "/admin/dispatch", label: "Dispatch", icon: ICONS.truck },
   { href: "/admin/bookings", label: "Bookings", icon: ICONS.list },
+  { href: "/admin/finance", label: "Finance", icon: ICONS.receipt },
   { href: "/admin/customers", label: "Customers", icon: ICONS.users },
   { href: "/admin/vehicles", label: "Vehicles", icon: ICONS.truck },
   { href: "/admin/pricing", label: "Pricing rules", icon: ICONS.sliders },

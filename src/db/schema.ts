@@ -9,6 +9,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  pgSequence,
   serial,
   text,
   timestamp,
@@ -50,6 +51,18 @@ export const bookingStatusEnum = pgEnum("booking_status", [
 ]);
 
 export const paymentMethodEnum = pgEnum("payment_method", ["card", "account"]);
+export const paymentProviderEnum = pgEnum("payment_provider", ["stripe", "manual"]);
+export const paymentStatusEnum = pgEnum("payment_status", ["pending", "succeeded", "failed", "partially_refunded", "refunded"]);
+export const refundStatusEnum = pgEnum("refund_status", ["pending", "succeeded", "failed", "cancelled"]);
+export const invoicePaymentStatusEnum = pgEnum("invoice_payment_status", [
+  "outstanding",
+  "pending",
+  "partially_paid",
+  "paid",
+  "failed",
+  "partially_refunded",
+  "refunded",
+]);
 
 // ---------------------------------------------------------------------------
 // Users
@@ -192,6 +205,20 @@ export type BookingStop = RoutePoint & {
   arrivedAt?: string | null;
   completedAt?: string | null;
 };
+export type BookingQuoteSnapshot = {
+  baseFareCents: number;
+  distanceCents: number;
+  coreCents: number;
+  minimumApplied: boolean;
+  minimumAdjustmentCents: number;
+  extras: { label: string; cents: number }[];
+  subtotalCents: number;
+  gstRateBasisPoints: number;
+  gstCents: number;
+  totalCents: number;
+};
+export type InvoiceCharge = { description: string; amountCents: number };
+export type InvoiceStopSnapshot = { address: string; lat: number | null; lng: number | null };
 
 export const bookings = pgTable(
   "bookings",
@@ -262,6 +289,7 @@ export const bookings = pgTable(
     estimatedDurationMinutes: integer("estimated_duration_minutes"),
     quotedPriceCents: integer("quoted_price_cents").notNull(),
     finalPriceCents: integer("final_price_cents"),
+    quoteBreakdown: jsonb("quote_breakdown").$type<BookingQuoteSnapshot>(),
     currency: text("currency").notNull().default("AUD"),
     paymentMethod: paymentMethodEnum("payment_method")
       .notNull()
@@ -294,6 +322,129 @@ export const bookings = pgTable(
     index("bookings_scheduled_idx").on(t.scheduledAt),
   ],
 );
+
+/** A finalized, immutable billing snapshot issued when a booking is completed. */
+export const invoiceNumberSequence = pgSequence("loadline_invoice_number_seq");
+
+export const invoices = pgTable(
+  "invoices",
+  {
+    id: serial("id").primaryKey(),
+    invoiceNumber: text("invoice_number").notNull().unique(),
+    bookingId: integer("booking_id")
+      .notNull()
+      .unique()
+      .references(() => bookings.id, { onDelete: "restrict" }),
+    customerId: integer("customer_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    bookingReference: text("booking_reference").notNull(),
+    customerName: text("customer_name").notNull(),
+    customerEmail: text("customer_email").notNull(),
+    customerCompany: text("customer_company"),
+    vehicleDescription: text("vehicle_description").notNull(),
+    loadDescription: text("load_description").notNull(),
+    pickupAddress: text("pickup_address").notNull(),
+    dropoffAddress: text("dropoff_address").notNull(),
+    additionalStops: jsonb("additional_stops")
+      .$type<InvoiceStopSnapshot[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    charges: jsonb("charges")
+      .$type<InvoiceCharge[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    subtotalCents: integer("subtotal_cents").notNull(),
+    taxLabel: text("tax_label").notNull().default("GST"),
+    taxRateBasisPoints: integer("tax_rate_basis_points").notNull(),
+    taxCents: integer("tax_cents").notNull(),
+    totalCents: integer("total_cents").notNull(),
+    currency: text("currency").notNull().default("AUD"),
+    paymentMethod: paymentMethodEnum("payment_method").notNull(),
+    paymentStatus: invoicePaymentStatusEnum("payment_status").notNull().default("outstanding"),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("invoices_amounts_nonnegative", sql`${t.subtotalCents} >= 0 and ${t.taxCents} >= 0 and ${t.totalCents} >= 0`),
+    check("invoices_total_matches_components", sql`${t.totalCents} = ${t.subtotalCents} + ${t.taxCents}`),
+    index("invoices_customer_idx").on(t.customerId),
+    index("invoices_payment_status_idx").on(t.paymentStatus),
+    index("invoices_issued_idx").on(t.issuedAt),
+  ],
+);
+
+/** Each hosted-checkout attempt or manually reconciled account payment is append-only. */
+export const payments = pgTable(
+  "payments",
+  {
+    id: serial("id").primaryKey(),
+    invoiceId: integer("invoice_id")
+      .notNull()
+      .references(() => invoices.id, { onDelete: "restrict" }),
+    bookingId: integer("booking_id")
+      .notNull()
+      .references(() => bookings.id, { onDelete: "restrict" }),
+    customerId: integer("customer_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    provider: paymentProviderEnum("provider").notNull(),
+    status: paymentStatusEnum("status").notNull().default("pending"),
+    amountCents: integer("amount_cents").notNull(),
+    refundedCents: integer("refunded_cents").notNull().default(0),
+    currency: text("currency").notNull().default("AUD"),
+    stripeCheckoutSessionId: text("stripe_checkout_session_id").unique(),
+    stripePaymentIntentId: text("stripe_payment_intent_id").unique(),
+    externalReference: text("external_reference"),
+    failureCode: text("failure_code"),
+    failureMessage: text("failure_message"),
+    recordedBy: integer("recorded_by").references(() => users.id, { onDelete: "set null" }),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("payments_amounts_valid", sql`${t.amountCents} > 0 and ${t.refundedCents} >= 0 and ${t.refundedCents} <= ${t.amountCents}`),
+    index("payments_invoice_idx").on(t.invoiceId),
+    index("payments_booking_idx").on(t.bookingId),
+    index("payments_customer_idx").on(t.customerId),
+    index("payments_status_idx").on(t.status),
+    index("payments_created_idx").on(t.createdAt),
+  ],
+);
+
+export const refunds = pgTable(
+  "refunds",
+  {
+    id: serial("id").primaryKey(),
+    paymentId: integer("payment_id")
+      .notNull()
+      .references(() => payments.id, { onDelete: "restrict" }),
+    stripeRefundId: text("stripe_refund_id").unique(),
+    amountCents: integer("amount_cents").notNull(),
+    status: refundStatusEnum("status").notNull().default("pending"),
+    reason: text("reason"),
+    failureMessage: text("failure_message"),
+    recordedBy: integer("recorded_by").references(() => users.id, { onDelete: "set null" }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("refunds_amount_positive", sql`${t.amountCents} > 0`),
+    index("refunds_payment_idx").on(t.paymentId),
+    index("refunds_status_idx").on(t.status),
+  ],
+);
+
+/** Stripe retries delivery; this ledger makes every event idempotent. */
+export const stripeWebhookEvents = pgTable("stripe_webhook_events", {
+  eventId: text("event_id").primaryKey(),
+  eventType: text("event_type").notNull(),
+  processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** Latest consented driver GPS fix for an active booking; one row per booking. */
 export const bookingLiveLocations = pgTable(
@@ -356,9 +507,19 @@ export type Booking = typeof bookings.$inferSelect;
 export type NewBooking = typeof bookings.$inferInsert;
 export type BookingEvent = typeof bookingEvents.$inferSelect;
 export type BookingLiveLocation = typeof bookingLiveLocations.$inferSelect;
+export type Invoice = typeof invoices.$inferSelect;
+export type NewInvoice = typeof invoices.$inferInsert;
+export type Payment = typeof payments.$inferSelect;
+export type NewPayment = typeof payments.$inferInsert;
+export type Refund = typeof refunds.$inferSelect;
+export type NewRefund = typeof refunds.$inferInsert;
 
 export type UserRole = (typeof userRoleEnum.enumValues)[number];
 export type UserStatus = (typeof userStatusEnum.enumValues)[number];
 export type VehicleStatus = (typeof vehicleStatusEnum.enumValues)[number];
 export type BookingStatus = (typeof bookingStatusEnum.enumValues)[number];
 export type PaymentMethod = (typeof paymentMethodEnum.enumValues)[number];
+export type PaymentProvider = (typeof paymentProviderEnum.enumValues)[number];
+export type PaymentStatus = (typeof paymentStatusEnum.enumValues)[number];
+export type RefundStatus = (typeof refundStatusEnum.enumValues)[number];
+export type InvoicePaymentStatus = (typeof invoicePaymentStatusEnum.enumValues)[number];

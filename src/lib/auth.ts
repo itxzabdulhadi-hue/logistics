@@ -127,6 +127,8 @@ export type Permission =
   | "fleet:read"
   | "fleet:manage"
   | "users:manage"
+  | "finance:read"
+  | "finance:manage"
   | "profile:manage";
 
 const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
@@ -137,6 +139,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     "customers:read",
     "fleet:read",
     "fleet:manage",
+    "finance:read",
     "profile:manage",
   ],
   admin: [
@@ -147,6 +150,8 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     "fleet:read",
     "fleet:manage",
     "users:manage",
+    "finance:read",
+    "finance:manage",
     "profile:manage",
   ],
   driver: ["bookings:read:assigned", "bookings:progress", "profile:manage"],

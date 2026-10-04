@@ -1,4 +1,4 @@
-# Loadline — Feature Specification (Phases 0–5)
+# Loadline — Feature Specification (Phases 0–6)
 
 ## 1. Personas
 
@@ -23,7 +23,7 @@
    6. Add on-site contacts, instructions and payment method, then **Confirm booking**.
    7. The server resolves the route and recalculates the price at submission; redirect to the booking detail page with the reference and status `pending`.
 4. **Booking history** — table of all bookings with status filter, free-text search (reference / address), pagination.
-5. **Booking details** — reference, status badge, route, schedule, load, driver/vehicle (once assigned), price (quoted vs final), status timeline with dispatcher notes, live vehicle map/status/progress/ETA when assigned, **Cancel booking** (allowed while `pending`, `confirmed`, `assigned`).
+5. **Booking details** — reference, status badge, route, schedule, load, driver/vehicle (once assigned), price (quoted vs final), status timeline with dispatcher notes, live vehicle map/status/progress/ETA when assigned, **Cancel booking** (allowed while `pending`, `confirmed`, `assigned`). On completion, view the numbered invoice, itemized charges, GST, payment status and transaction/refund history; card customers can pay the balance through Stripe Checkout.
 6. **Profile** — update name/phone/company, change password.
 7. **Forgot password** — request a reset link, set a new password with the token.
 
@@ -42,12 +42,13 @@
    * **Vehicles**: create/edit/delete units, capacity, status (available / in use / maintenance / inactive), current last-known location, link to a single driver.
    * **Drivers**: create accounts and profiles with licence details, on-duty/off-duty availability, assigned vehicle and current job.
    * Busy/suspended/off-duty drivers and allocated trucks cannot be selected for a new dispatch.
+6. **Finance** — admins and dispatchers can review revenue, successful payments, refunds, outstanding invoice balances, failed attempts and recent transaction history. Admins can manually reconcile on-account/bank payments and issue Stripe refunds; dispatchers are read-only.
 
 ## 4. Driver journey (Phases 3–4 — implemented)
 
 Login → `/driver` → toggle on/off duty → see active assignments ordered by pickup time → review the mapped route, stops, customer contacts, load and assigned truck → progress *Assigned → En route to pickup → Picked up → In transit*. While in transit, mark each intermediate stop arrived and completed in planned order, then report the final delivery. On an active trip, the driver can explicitly start or stop location sharing; the browser sends GPS coordinates and a device timestamp about every 10 seconds. A driver can report a failed job with a required reason. Dispatch completes delivered jobs or reopens failed jobs for re-dispatch. Driver actions and GPS updates are restricted to that driver's current assignment; every status transition is added to the audit timeline.
 
-Customer booking details and staff dispatch/detail pages show the current vehicle position, route, booking status, estimated arrival and delivery progress. WebSocket events push updates across instances via Redis Pub/Sub; PostgreSQL stores the latest fix, and clients resubscribe/reload after reconnects. Plain `next dev` uses automatic snapshot sync because Vercel's experimental WebSocket upgrade is platform-specific. Proof-of-delivery photos/signatures, push/email notifications, ratings and driver payment remain future work.
+Customer booking details and staff dispatch/detail pages show the current vehicle position, route, booking status, estimated arrival and delivery progress. WebSocket events push updates across instances via Redis Pub/Sub; PostgreSQL stores the latest fix, and clients resubscribe/reload after reconnects. Plain `next dev` uses automatic snapshot sync because Vercel's experimental WebSocket upgrade is platform-specific. Proof-of-delivery photos/signatures, push/email notifications, ratings and driver payouts remain future work.
 
 ---
 
@@ -230,3 +231,32 @@ Vercel setup: enable Fluid Compute (default on newer projects) and configure `RE
 3. As the assigned driver, depart for delivery and mark each stop arrived/completed. Confirm a later stop cannot be updated before the current one is completed, and the final delivery action remains disabled until all intermediate stops are complete.
 4. Verify customer/admin tracking shows the full route, per-stop status and ETA; verify driver directions and the driver route map follow the same order.
 5. Apply the schema with `npm run db:push`, then run typecheck, lint and production build before deployment.
+
+---
+
+## 11. Phase 6 — Payments, invoicing & finance (implemented; deployment configuration required)
+
+### Invoices and checkout
+
+- [x] Persist the server-calculated itemized quote and GST snapshot with every new booking; seeded jobs carry the same breakdown.
+- [x] On the `delivered → completed` transition, issue exactly one sequentially numbered invoice. It snapshots the customer, booking, route and ordered stops, vehicle, charges, tax, final total, currency and payment method. Invoice creation is idempotent per booking.
+- [x] Customer booking detail displays the invoice, payment status and transaction/refund history. The card invoice is payable through Stripe-hosted Checkout; the app never stores card numbers and never treats the success redirect as payment confirmation.
+- [x] Verify Stripe webhook signatures and deduplicate event IDs before changing local payment/refund state. Preserve failed/expired attempts and allow another hosted Checkout attempt.
+- [x] Account invoices stay outstanding until an admin records an external/bank payment with an optional reconciliation reference.
+
+### Finance operations & controls
+
+- [x] `/admin/finance` shows monthly net revenue, successful payment totals/counts, refunds, outstanding balances, failed/pending attempts, open invoices and recent transactions.
+- [x] Admins can issue full or partial Stripe refunds and reconcile account invoices; staff actions record actor IDs and timestamps. Dispatchers can view, but not alter, finance records.
+- [x] Persist payments, failure details, refunds and processed webhook event IDs for an auditable transaction history. Use integer cents and protect invoices with unique booking and invoice-number constraints.
+- [x] Show Stripe configuration state and a clear disabled-checkout message when server credentials are absent; never expose secret or webhook keys to the browser.
+
+### Phase 6 acceptance checks
+
+1. Apply the schema (`npm run db:push`) in a test database. Create and complete a booking with a final price; confirm one invoice is created with the correct customer, route, vehicle, itemized charges, tax, total and unique invoice number. Repeat or replay completion and confirm no duplicate invoice is created.
+2. With Stripe test credentials and a test webhook configured, start Checkout from the customer's completed card booking. Complete a test payment and verify the webhook marks the payment/invoice paid; cancel or expire another session and verify it remains unpaid and can be retried.
+3. Deliver a failed payment event, duplicate webhook event and invalid signature. Confirm failed attempts persist, duplicate processing is harmless, and unsigned events cannot change payment status.
+4. Create an account invoice, record a partial and then final bank payment as an admin, and verify outstanding balance, payment status and reference update. Confirm dispatcher access is read-only.
+5. As an admin, issue a partial and full refund for a successful test payment. Verify refund status, refunded totals, invoice payment status, actor audit data, and that over-refunds or repeated refunds above the remaining refundable amount are rejected.
+6. Review `/admin/finance` totals for revenue, refunds and outstanding balances; check that customer transaction history displays successful, pending, failed and refunded attempts. Verify Stripe-unconfigured mode remains usable for account reconciliation.
+7. Run typecheck, tests/lint (where configured), and a production build before deployment; set both Stripe environment variables and register the webhook URL in Stripe for each deployment environment.

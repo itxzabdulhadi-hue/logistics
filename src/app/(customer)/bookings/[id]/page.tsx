@@ -3,6 +3,8 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { CancelBookingButton } from "@/components/booking-actions";
 import { LiveTrackingFeed } from "@/components/live-tracking-feed";
+import { InvoicePanel } from "@/components/payments/invoice-panel";
+import { PaymentConfirmationRefresh } from "@/components/payments/payment-confirmation-refresh";
 import { RouteMap } from "@/components/route-map";
 import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
 import { isStaff, requireUser } from "@/lib/auth";
@@ -10,6 +12,7 @@ import { CUSTOMER_CANCELLABLE, STATUS_META } from "@/lib/booking-rules";
 import { formatDateTime, formatDuration, formatKm, formatMoney, titleCase } from "@/lib/utils";
 import { getBookingDetail } from "@/services/bookings";
 import { getTrackingSnapshot } from "@/services/tracking";
+import { getInvoiceForBooking, isStripeReady } from "@/services/billing";
 
 export const metadata: Metadata = { title: "Booking" };
 export const dynamic = "force-dynamic";
@@ -19,12 +22,12 @@ export default async function BookingDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ created?: string }>;
+  searchParams: Promise<{ created?: string; payment?: string }>;
 }) {
   const user = await requireUser();
   if (user.role === "driver") redirect("/driver");
   const { id } = await params;
-  const { created } = await searchParams;
+  const { created, payment } = await searchParams;
   const bookingId = Number(id);
   if (!Number.isInteger(bookingId)) notFound();
   if (isStaff(user.role)) redirect(`/admin/bookings/${bookingId}`);
@@ -35,7 +38,10 @@ export default async function BookingDetailPage({
   const ownsIt = b.customerId === user.id;
   if (!ownsIt) notFound();
   const trackable = ["assigned", "en_route_pickup", "picked_up", "in_transit", "delivered"].includes(b.status);
-  const tracking = b.driverId != null && trackable ? await getTrackingSnapshot(b.id) : null;
+  const [tracking, invoiceHistory] = await Promise.all([
+    b.driverId != null && trackable ? getTrackingSnapshot(b.id) : Promise.resolve(null),
+    b.status === "completed" ? getInvoiceForBooking(b.id) : Promise.resolve(null),
+  ]);
 
   const canCancel = b.customerId === user.id && CUSTOMER_CANCELLABLE.includes(b.status);
   const directionsUrl = new URL("https://www.google.com/maps/dir/");
@@ -75,6 +81,21 @@ export default async function BookingDetailPage({
           Your reference is <b>{b.reference}</b>. A dispatcher will confirm it shortly — you can follow progress on this page.
         </Alert>
       )}
+      {payment === "success" && invoiceHistory?.invoice.paymentStatus === "paid" ? (
+        <Alert tone="success" title="Payment confirmed" className="mb-6">Your payment has been confirmed and recorded on invoice {invoiceHistory.invoice.invoiceNumber}.</Alert>
+      ) : payment === "success" && invoiceHistory?.invoice.paymentStatus === "failed" ? (
+        <Alert tone="warning" title="Payment not confirmed" className="mb-6">Review the failed attempt below and retry card checkout, or contact dispatch for help.</Alert>
+      ) : payment === "success" ? (
+        <Alert tone="info" title="Payment submitted" className="mb-6">
+          Stripe is confirming your payment. This page will check for the signed payment confirmation for up to one minute.
+        </Alert>
+      ) : null}
+      {payment === "success" && !["paid", "failed"].includes(invoiceHistory?.invoice.paymentStatus ?? "") && <PaymentConfirmationRefresh shouldRefresh />}
+      {payment === "cancelled" && (
+        <Alert tone="warning" title="Checkout cancelled" className="mb-6">
+          No payment was taken. You can return to this invoice and try again when you are ready.
+        </Alert>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
         <div className="space-y-6">
@@ -100,6 +121,9 @@ export default async function BookingDetailPage({
               title="Live vehicle tracking"
               description="Follow the assigned vehicle, current job status, route progress and estimated delivery."
             />
+          )}
+          {invoiceHistory && (
+            <InvoicePanel history={invoiceHistory} canCheckout={b.paymentMethod === "card"} stripeReady={isStripeReady()} />
           )}
 
           <Card>

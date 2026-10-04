@@ -197,6 +197,20 @@ export const bookingActionSchema = z.discriminatedUnion("action", [
 ]);
 export type BookingAction = z.infer<typeof bookingActionSchema>;
 
+export const checkoutSchema = z.object({
+  bookingId: z.coerce.number().int().positive(),
+});
+
+export const recordManualPaymentSchema = z.object({
+  amountCents: z.coerce.number().int().positive().max(1_000_000_000),
+  externalReference: optionalText(120),
+});
+
+export const refundSchema = z.object({
+  amountCents: optionalInt(1, 1_000_000_000),
+  reason: z.enum(["requested_by_customer", "duplicate", "fraudulent"]).default("requested_by_customer"),
+});
+
 // ---------------------------------------------------------------------------
 // Admin: customers / fleet
 // ---------------------------------------------------------------------------

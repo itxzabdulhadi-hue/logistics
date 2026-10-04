@@ -1,6 +1,6 @@
-# Loadline — Architecture (Phases 0–5)
+# Loadline — Architecture (Phases 0–6)
 
-Loadline is an Instatruck-style on-demand truck booking SaaS: customers book a truck for a pickup → delivery job, dispatchers confirm/price/assign the job to a driver + vehicle, and drivers execute it. This document captures the Phase 0 decisions: how Instatruck works, the journeys we are modelling, the MVP cut, the stack, the system architecture, the database design, and the REST API surface.
+Loadline is an Instatruck-style on-demand truck booking SaaS: customers book a truck for a pickup → delivery job, dispatchers confirm/price/assign the job to a driver + vehicle, and drivers execute it. This document captures the platform decisions through Phase 6: the journeys we model, scope choices, stack, system architecture, database design and REST API surface.
 
 ---
 
@@ -22,8 +22,8 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 
 ## 2. Journeys (summary — full detail in `FEATURE_SPEC.md`)
 
-* **Customer**: register → log in → dashboard → route (pickup → ordered stops → final drop-off, optionally optimized) → vehicle/load → itemized quote → confirmation → booking → follow stop status and live vehicle tracking → cancel/manage profile.
-* **Admin / Dispatcher**: log in → dashboard → dispatch board (unassigned jobs + available people/fleet + active vehicle map) → confirm/assign/reassign → review status and GPS progress → adjust final price/notes → complete or cancel → manage customers, driver profiles and fleet.
+* **Customer**: register → log in → dashboard → route (pickup → ordered stops → final drop-off, optionally optimized) → vehicle/load → itemized quote → confirmation → booking → follow stop status and live vehicle tracking → view completed invoice and payment/refund history → pay securely by card or contact staff about account terms → cancel/manage profile.
+* **Admin / Dispatcher**: log in → dashboard → dispatch board (unassigned jobs + available people/fleet + active vehicle map) → confirm/assign/reassign → review status and GPS progress → adjust final price/notes → complete or cancel → manage customers, driver profiles and fleet. Use the finance area to review revenue, refunds, failed attempts and outstanding balances; admins can issue card refunds and reconcile account payments.
 * **Driver**: log in → set on/off duty → see assigned jobs and planned route → start trip → optionally share device GPS → collect the load → mark each delivery stop arrived/completed in order → report final delivery or exceptions.
 
 ---
@@ -63,7 +63,14 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 * Intermediate stop status and timestamps live on each existing JSONB stop entry. Drivers mark stops arrived and completed sequentially while in transit, and the server prevents final delivery before the stops are complete.
 * Tracking estimates each delivery stop's ETA from the route duration and current route progress; it is deliberately not live-traffic aware.
 
-**Deliberately deferred:** proof-of-delivery photos/signatures, card payments (Stripe), invoices/PDF, email/push notifications, ratings and marketplace auto-dispatch. Fleet's editable vehicle location remains a dispatcher-maintained label and is separate from consented trip GPS.
+**Phase 6 — payments, invoicing & finance:**
+
+* Persist server-calculated quote line items and tax with the booking, and issue one immutable invoice per booking when dispatch completes the job. The invoice snapshots its number, customer, booking, vehicle, route/stops, charges, GST, currency, final total and payment method.
+* Use Stripe-hosted Checkout for card invoices. The app does not handle/store card details. Signed, idempotent Stripe webhooks are the sole source of truth for payment and refund state; Checkout redirects are not confirmation.
+* Retain successful, pending, failed, expired and refunded transactions, webhook event IDs, refund amounts/status, and staff actors for manual account reconciliation.
+* Customers see invoices and payment history. `/admin/finance` aggregates monthly net revenue, payments, refunds, failures and outstanding balances. Dispatchers are read-only; admins may record external account payments or issue Stripe refunds.
+
+**Deliberately deferred:** proof-of-delivery photos/signatures, email/push notifications, ratings, driver payouts and marketplace auto-dispatch. Invoice PDF/credit-note workflows are not yet included. Fleet's editable vehicle location remains a dispatcher-maintained label and is separate from consented trip GPS.
 
 ---
 
@@ -78,6 +85,7 @@ The three personas that fall out of this are **Customer**, **Admin/Dispatcher**,
 | Validation | **zod** | Shared request schemas for API routes; detailed 422 errors. |
 | Maps & routing | Photon autocomplete/geocoding + OSRM driving routes + OpenStreetMap tiles | API-key-free route lookup, driving distance/time, and attributed route preview; replace public demo endpoints with a production provider for SLA/volume. |
 | Realtime | Vercel `experimental_upgradeWebSocket` + Redis Pub/Sub | Persistent Vercel socket connections with Redis fan-out across instances; latest GPS/status snapshots stay durable in PostgreSQL. Requires `REDIS_URL`; clients reconnect at the configured five-minute function limit. |
+| Payments | Stripe-hosted Checkout + signed webhooks | Card data stays with Stripe. `STRIPE_SECRET_KEY` starts Checkout/refunds; `STRIPE_WEBHOOK_SECRET` verifies idempotent payment/refund events. Account payments are recorded by admins. |
 | Logging | Lightweight structured JSON logger (`src/lib/logger.ts`) | Request/response + error logs; swap for pino/Datadog later. |
 
 ---
@@ -135,10 +143,15 @@ users 1──∞ bookings ∞──1 vehicle_types
   │            │ ∞──0..1 vehicles ∞──1 vehicle_types
   │            │ ∞──0..1 users (driver)
   │            ├─1──∞ booking_events ∞──0..1 users (actor)
-  │            └─1──0..1 booking_live_locations
+  │            ├─1──0..1 booking_live_locations
+  │            └─1──0..1 invoices ──1──∞ payments ──1──∞ refunds
   ├─0..1 driver_profiles
   ├─0..1 vehicles (one usual vehicle per driver)
+  ├─1──∞ invoices
+  ├─1──∞ payments
   └─1──∞ password_reset_tokens
+
+stripe_webhook_events (idempotency ledger; event IDs are independent of user records)
 ```
 
 ### Tables
@@ -180,7 +193,7 @@ users 1──∞ bookings ∞──1 vehicle_types
 * route: ordered `additional_stops` JSONB array (`address`, `lat`, `lng`, optional `status` = `pending`/`arrived`/`completed`, `arrivedAt`, `completedAt`), OSRM `route_geometry` JSONB, `route_optimized`, road `distance_km`, `estimated_duration_minutes`
 * schedule: `is_asap`, `scheduled_at`
 * load: `load_description`, `weight_kg`, `pallets`, `item_count`, `requires_tailgate`, `requires_hand_unload`
-* money: `quoted_price_cents`, `final_price_cents`, `currency` (AUD), `payment_method` (`card` | `account`)
+* money: `quoted_price_cents`, `final_price_cents`, `currency` (AUD), `payment_method` (`card` | `account`), and `quote_breakdown` JSONB with server-calculated quote components/GST captured at booking creation
 * notes: `customer_notes`, `admin_notes`, `cancellation_reason`
 
 Indexes on `customer_id`, `driver_id`, `status`, `scheduled_at`.
@@ -189,7 +202,15 @@ Indexes on `customer_id`, `driver_id`, `status`, `scheduled_at`.
 
 **booking_live_locations** — one latest, consented GPS fix per active trip: booking/driver/vehicle IDs, latitude/longitude, optional accuracy/heading/speed, device `captured_at`, and server `received_at`. The row is deleted when the assignment is released or the trip is cancelled, failed or completed; it is not a high-volume breadcrumb history.
 
-All money is stored as **integer cents** to avoid floating point drift; distances are `double precision`.
+**invoices** — immutable billing snapshot created on booking completion. `invoice_number` and `booking_id` are unique; the record stores customer/booking references, customer contact/company, vehicle and load, pickup/drop-off and ordered stop snapshots, JSONB itemized charges, subtotal, GST rate/amount, total, currency, payment method, payment status, issue/due timestamps. Customer and booking foreign keys restrict deletion so accounting history is retained. `loadline_invoice_number_seq` supplies unique invoice numbers.
+
+**payments** — append-only payment attempts and manual receipts linked to invoice/booking/customer. `provider` is `stripe` or `manual`; status distinguishes pending, succeeded, failed, partial/full refund. Store amount/refunded amount in cents, Stripe Checkout Session and PaymentIntent IDs (unique), external reconciliation reference, failure details, actor (`recorded_by`), paid and audit timestamps. Check constraints prevent non-positive amounts and over-refunding.
+
+**refunds** — Stripe refunds linked to a payment, including unique Stripe refund ID, amount, pending/succeeded/failed/cancelled status, reason, failure detail, acting staff ID, and timestamps. Refund totals update the payment and invoice status only when Stripe confirms them.
+
+**stripe_webhook_events** — event ID primary key, event type and processed timestamp. Inserting the event and applying its state transition happen in one transaction, making Stripe retries idempotent.
+
+All money is stored as **integer cents** to avoid floating point drift; distances are `double precision`. Invoice snapshots are the customer-facing source of truth after completion; later price corrections require a refund rather than editing a posted invoice.
 
 ---
 
@@ -256,6 +277,11 @@ Conventions: JSON in/out, cookie-based auth, `{ error: { code, message, details?
 | `POST /api/bookings` | customer | create booking (server recomputes price) |
 | `GET /api/bookings/:id` | owner / staff | booking detail + timeline |
 | `PATCH /api/bookings/:id` | owner / assigned driver / staff | `{action:"cancel"}` (customer) · assigned driver status progress or ordered `{action:"stop", stopIndex, status}` · assign/reassign/unassign, status, price and notes (staff); emits realtime status events |
+| `POST /api/payments/checkout` | booking owner | create/reuse a Stripe-hosted Checkout session for an issued card invoice |
+| `POST /api/payments/webhook` | Stripe signature | verify and idempotently apply Checkout, PaymentIntent and refund events |
+| `GET /api/admin/finance` | staff (`finance:read`) | finance summary, outstanding balances and recent transactions |
+| `POST /api/admin/payments/:id/refund` | admin (`finance:manage`) | request a full/partial Stripe refund |
+| `POST /api/admin/invoices/:id/payments` | admin (`finance:manage`) | reconcile an on-account invoice payment with optional reference |
 | `POST /api/driver/location` | assigned driver | validate and persist the latest GPS fix for an active job; publish its location event |
 | `GET /api/tracking?bookingIds=…` | booking owner / assigned driver / staff | authorized batch snapshot for route, status, ETA inputs and latest GPS position |
 | `GET /api/tracking/socket` | authenticated user | Vercel WebSocket; server authorizes each booking subscription and relays Redis Pub/Sub events |
@@ -273,8 +299,8 @@ Conventions: JSON in/out, cookie-based auth, `{ error: { code, message, details?
 | role | permissions |
 | --- | --- |
 | customer | `bookings:create`, `bookings:read:own`, `bookings:cancel:own`, `profile:manage` |
-| dispatcher | `bookings:read:any`, `bookings:manage`, `customers:read`, `fleet:read`, `fleet:manage`, `profile:manage` |
-| admin | everything above + `customers:manage`, `users:manage` |
+| dispatcher | `bookings:read:any`, `bookings:manage`, `customers:read`, `fleet:read`, `fleet:manage`, `finance:read`, `profile:manage` |
+| admin | everything above + `customers:manage`, `users:manage`, `finance:manage` |
 | driver | `bookings:read:assigned`, `bookings:progress`, `profile:manage` |
 
 The `/admin/pricing` page and pricing-rules mutation are restricted to the `admin` role.

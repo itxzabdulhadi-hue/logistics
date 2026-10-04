@@ -30,6 +30,7 @@ import {
 } from "@/lib/booking-rules";
 import { estimateDrivingRoute } from "@/lib/geocode";
 import { logger } from "@/lib/logger";
+import { ensureInvoiceForBooking } from "@/services/billing";
 import type { createBookingSchema } from "@/lib/validation";
 import { getPricingRules } from "@/services/pricing";
 
@@ -141,6 +142,18 @@ export async function createBooking(actor: Actor, input: CreateBookingInput): Pr
       distanceKm: quote.distanceKm,
       estimatedDurationMinutes: Math.ceil(route.durationSeconds / 60),
       quotedPriceCents: quote.totalCents,
+      quoteBreakdown: {
+        baseFareCents: quote.baseFareCents,
+        distanceCents: quote.distanceCents,
+        coreCents: quote.coreCents,
+        minimumApplied: quote.minimumApplied,
+        minimumAdjustmentCents: quote.minimumAdjustmentCents,
+        extras: quote.extras,
+        subtotalCents: quote.subtotalCents,
+        gstRateBasisPoints: quote.gstRateBasisPoints,
+        gstCents: quote.gstCents,
+        totalCents: quote.totalCents,
+      },
       paymentMethod: input.paymentMethod,
       customerNotes: input.customerNotes ?? null,
     };
@@ -323,7 +336,7 @@ export async function transitionBooking(
   note?: string,
   options: { driverId?: number; customerId?: number } = {},
 ): Promise<Booking> {
-  return db.transaction(async (tx) => {
+  const updatedBooking = await db.transaction(async (tx) => {
     const [b] = await tx.select().from(bookings).where(eq(bookings.id, id)).for("update");
     if (!b) throw errors.notFound("Booking not found");
     if (options.driverId != null) {
@@ -406,6 +419,8 @@ export async function transitionBooking(
     logger.info("booking.transition", { bookingId: id, from: b.status, to, actorId: actor.id });
     return updated;
   });
+  if (to === "completed") await ensureInvoiceForBooking(id);
+  return updatedBooking;
 }
 
 export async function updateBookingStopStatus(
@@ -641,34 +656,39 @@ export async function updateBookingAdmin(
   input: { finalPriceCents?: number | null; adminNotes?: string | null },
   actor: Actor,
 ): Promise<Booking> {
-  const [b] = await db.select().from(bookings).where(eq(bookings.id, id)).limit(1);
-  if (!b) throw errors.notFound("Booking not found");
-  const patch: Partial<NewBooking> = { updatedAt: new Date() };
-  const notes: string[] = [];
-  if (input.finalPriceCents !== undefined && input.finalPriceCents !== b.finalPriceCents) {
-    patch.finalPriceCents = input.finalPriceCents;
-    notes.push(
-      input.finalPriceCents == null
-        ? "Final price reset to quoted price"
-        : `Final price set to $${(input.finalPriceCents / 100).toFixed(2)}`,
-    );
-  }
-  if (input.adminNotes !== undefined && input.adminNotes !== b.adminNotes) {
-    patch.adminNotes = input.adminNotes;
-    notes.push("Internal notes updated");
-  }
-  const [updated] = await db.update(bookings).set(patch).where(eq(bookings.id, id)).returning();
-  if (notes.length) {
-    await db.insert(bookingEvents).values({
-      bookingId: id,
-      fromStatus: b.status,
-      toStatus: b.status,
-      actorId: actor.id,
-      actorRole: actor.role,
-      note: notes.join(" · "),
-    });
-  }
-  return updated;
+  return db.transaction(async (tx) => {
+    const [b] = await tx.select().from(bookings).where(eq(bookings.id, id)).for("update");
+    if (!b) throw errors.notFound("Booking not found");
+    if (b.status === "completed" && input.finalPriceCents !== undefined && input.finalPriceCents !== b.finalPriceCents) {
+      throw errors.conflict("The final price is locked when the job is completed. Use a refund for post-invoice corrections.", "INVOICE_PRICE_LOCKED");
+    }
+    const patch: Partial<NewBooking> = { updatedAt: new Date() };
+    const notes: string[] = [];
+    if (input.finalPriceCents !== undefined && input.finalPriceCents !== b.finalPriceCents) {
+      patch.finalPriceCents = input.finalPriceCents;
+      notes.push(
+        input.finalPriceCents == null
+          ? "Final price reset to quoted price"
+          : `Final price set to $${(input.finalPriceCents / 100).toFixed(2)}`,
+      );
+    }
+    if (input.adminNotes !== undefined && input.adminNotes !== b.adminNotes) {
+      patch.adminNotes = input.adminNotes;
+      notes.push("Internal notes updated");
+    }
+    const [updated] = await tx.update(bookings).set(patch).where(eq(bookings.id, id)).returning();
+    if (notes.length) {
+      await tx.insert(bookingEvents).values({
+        bookingId: id,
+        fromStatus: b.status,
+        toStatus: b.status,
+        actorId: actor.id,
+        actorRole: actor.role,
+        note: notes.join(" · "),
+      });
+    }
+    return updated;
+  });
 }
 
 /** Operational board for a driver: only jobs actively assigned to their account. */

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BookingManager } from "@/components/admin/booking-manager";
 import { LiveTrackingFeed } from "@/components/live-tracking-feed";
+import { InvoicePanel } from "@/components/payments/invoice-panel";
 import { RouteMap } from "@/components/route-map";
 import { Alert, Card, CardHeader, DescriptionList, PageHeader, StatusBadge, Timeline } from "@/components/ui";
 import { requireRole } from "@/lib/auth";
@@ -12,6 +13,7 @@ import { getBookingDetail } from "@/services/bookings";
 import { listAssignableVehicles } from "@/services/fleet";
 import { listDrivers } from "@/services/users";
 import { getTrackingSnapshot } from "@/services/tracking";
+import { getInvoiceForBooking } from "@/services/billing";
 
 export const metadata: Metadata = { title: "Manage booking" };
 export const dynamic = "force-dynamic";
@@ -25,10 +27,11 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
   if (!detail) notFound();
   const { booking: b } = detail;
   const trackable = b.driverId != null && ["assigned", "en_route_pickup", "picked_up", "in_transit", "delivered"].includes(b.status);
-  const [drivers, vehicles, tracking] = await Promise.all([
+  const [drivers, vehicles, tracking, invoiceHistory] = await Promise.all([
     listDrivers(),
     listAssignableVehicles({ includeVehicleId: b.vehicleId ?? undefined }),
     trackable ? getTrackingSnapshot(b.id) : Promise.resolve(null),
+    b.status === "completed" ? getInvoiceForBooking(b.id) : Promise.resolve(null),
   ]);
   const directionsUrl = new URL("https://www.google.com/maps/dir/");
   directionsUrl.searchParams.set("api", "1");
@@ -98,6 +101,7 @@ export default async function AdminBookingDetailPage({ params }: { params: Promi
               description="Latest GPS position, route progress and estimated delivery from the assigned driver."
             />
           )}
+          {invoiceHistory && <InvoicePanel history={invoiceHistory} />}
 
           <Card>
             <CardHeader title="Job details" />

@@ -60,6 +60,7 @@ export function BookingManager({ booking, drivers, vehicles }: Props) {
 
   const next = TRANSITIONS[booking.status].filter((s) => s !== "assigned");
   const canAssign = ["pending", "confirmed", "assigned"].includes(booking.status);
+  const finalPriceLocked = booking.status === "completed";
 
   async function act(key: string, body: Record<string, unknown>) {
     setBusy(key);
@@ -194,10 +195,13 @@ export function BookingManager({ booking, drivers, vehicles }: Props) {
       )}
 
       <Card>
-        <CardHeader title="Pricing & internal notes" description="Internal notes are never shown to the customer." />
+        <CardHeader
+          title={finalPriceLocked ? "Invoice & internal notes" : "Pricing & internal notes"}
+          description={finalPriceLocked ? "The posted invoice is immutable; issue a refund for a post-completion correction." : "Internal notes are never shown to the customer."}
+        />
         <div className="space-y-4 p-5">
-          <Field label="Final price (AUD, inc. GST)" error={fields.finalPriceCents} hint={`Quoted ${(booking.quotedPriceCents / 100).toLocaleString("en-AU", { style: "currency", currency: "AUD" })}. Leave blank to bill the quoted price.`}>
-            <Input type="number" min={0} step="0.01" value={finalPrice} onChange={(e) => setFinalPrice(e.target.value)} placeholder={(booking.quotedPriceCents / 100).toFixed(2)} />
+          <Field label="Final price (AUD, inc. GST)" error={fields.finalPriceCents} hint={finalPriceLocked ? "Locked after completion." : `Quoted ${(booking.quotedPriceCents / 100).toLocaleString("en-AU", { style: "currency", currency: "AUD" })}. Leave blank to bill the quoted price.`}>
+            <Input type="number" min={0} step="0.01" value={finalPrice} onChange={(e) => setFinalPrice(e.target.value)} placeholder={(booking.quotedPriceCents / 100).toFixed(2)} disabled={finalPriceLocked} />
           </Field>
           <Field label="Internal notes" error={fields.adminNotes}>
             <Textarea value={adminNotes} onChange={(e) => setAdminNotes(e.target.value)} placeholder="Key account, access issues, tolls, waiting time…" />
@@ -209,12 +213,12 @@ export function BookingManager({ booking, drivers, vehicles }: Props) {
             onClick={() =>
               act("update", {
                 action: "update",
-                finalPriceCents: finalPrice.trim() === "" ? null : Math.round(Number(finalPrice) * 100),
+                ...(finalPriceLocked ? {} : { finalPriceCents: finalPrice.trim() === "" ? null : Math.round(Number(finalPrice) * 100) }),
                 adminNotes,
               })
             }
           >
-            Save pricing & notes
+            {finalPriceLocked ? "Save internal notes" : "Save pricing & notes"}
           </Button>
         </div>
       </Card>

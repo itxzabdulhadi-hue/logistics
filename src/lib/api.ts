@@ -22,6 +22,8 @@ export const errors = {
     new ApiError(401, "UNAUTHORIZED", message),
   forbidden: (message = "You do not have permission to do that") =>
     new ApiError(403, "FORBIDDEN", message),
+  unavailable: (message = "This service is temporarily unavailable") =>
+    new ApiError(503, "SERVICE_UNAVAILABLE", message),
   notFound: (message = "Not found") => new ApiError(404, "NOT_FOUND", message),
   conflict: (message: string, code = "CONFLICT") => new ApiError(409, code, message),
   validation: (details: unknown, message = "Validation failed") =>
